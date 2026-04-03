@@ -6,9 +6,9 @@
 
 ## Summary
 
-pass_rate: 88%
-features_total: 8
-features_pass: 7
+pass_rate: 95%
+features_total: 10
+features_pass: 9
 features_partial: 1
 features_fail: 0
 
@@ -16,93 +16,170 @@ features_fail: 0
 
 | # | Feature | Weight | Score | Summary |
 |---|---------|--------|-------|---------|
-| 1 | Data Access | 3 | Partial | Core listing works but label/untriaged filtering applied post-pagination — returns wrong results |
-| 2 | Body Reading | 3 | Pass | Cache, emlx parsing, HTML→markdown, to/cc caching all working |
-| 3 | Search | 3 | Pass | Metadata search by sender/subject/date works; Spotlight body search implemented |
-| 4 | Triage Labels | 3 | Pass | Assign 1-5, clear with 0, filter, untriaged detection, persistence all correct |
-| 5 | Mail Actions | 2 | Pass | VIP protection, confirmation flow, AppleScript escaping all correct; inherently untestable without Mail.app |
-| 6 | Auto-Triage | 3 | Pass | Rule evaluation, VIP priority, idempotency, dry-run, summary all verified |
-| 7 | Rules Engine | 3 | Pass | TOML config, VIP, first-match-wins, any_of, sender_exact/contains all working |
-| 8 | CLI Interface | 3 | Pass | JSON output, exit codes (non-zero on error), --yes confirmation, no stderr all correct |
+| 1 | CLI Interface | 1 | Pass | All commands output valid JSON, exit codes correct, --yes flag works |
+| 2 | Data Access | 1 | Pass | Listings, folder filter, pagination, read status all correct |
+| 3 | Body Reading | 1 | Pass | Body parsing, HTML→markdown, caching, headers all work |
+| 4 | Search | 1 | Pass | Sender, subject, date range, body (Spotlight), combined filters work |
+| 5 | Triage Labels | 1 | Pass | Assign 1-5, clear with 0, filter, untriaged, persistence all work |
+| 6 | Mail Actions | 1 | Partial | VIP bulk action logic blocks ALL emails (including non-VIP) when VIPs present |
+| 7 | Auto-Triage | 1 | Pass | Labels receipts, trashes matches, VIP protection, idempotent |
+| 8 | Rules Engine | 1 | Pass | TOML config, match criteria, VIP list, first-match-wins, roundtrip |
+| 9 | Overlay DB | 1 | Pass | Auto-create, migrations, identity mapping, persistence |
+| 10 | Skill Wrapper | 1 | Pass | SKILL.md exists with full command reference and triage workflow |
 
 ## Detailed Findings
 
-### Feature 1: Data Access
+### Feature 1: CLI Interface
+**Score:** Pass
+**Evidence:**
+- Tested: Parsed all CLI subcommands via clap unit tests (7 tests)
+- Tested: All three response formatters (success, error, confirm) produce valid JSON
+- Tested: Integration test confirms exit code 0 on success, non-zero on error
+- Tested: Integration test confirms no stderr output on errors
+- Expected: Binary named `mea`, JSON output, structured errors, --yes confirmation
+- Actual: All criteria met
+**Issues:** None
+
+### Feature 2: Data Access
+**Score:** Pass
+**Evidence:**
+- Tested: `list_emails` on mock DB returns correct emails sorted by date descending
+- Tested: Pagination works (page 0 = first N, page 1 = remainder)
+- Tested: Folder filter narrows to matching mailbox URL
+- Tested: Read/unread status accurately reflected from `read` column
+- Tested: Labels joined from overlay DB at display time via `list_emails_filtered`
+- Tested: Label/untriaged filters applied BEFORE pagination (regression test included)
+- Expected: All acceptance criteria from data-access spec
+- Actual: All criteria met
+**Issues:** None
+
+### Feature 3: Body Reading
+**Score:** Pass
+**Evidence:**
+- Tested: Plain text email parsing returns format "plain" with correct body
+- Tested: HTML email parsing converts to readable text with format "markdown"
+- Tested: `.emlx` file format parsing (byte count + RFC 2822 message)
+- Tested: Cache stores and retrieves body with to/cc fields
+- Tested: Cache upsert replaces existing cached body
+- Tested: Second read returns instantly from cache
+- Tested: Body persists across DB connections
+- Expected: All acceptance criteria from body-reading spec
+- Actual: All criteria met
+**Issues:** None
+
+### Feature 4: Search
+**Score:** Pass
+**Evidence:**
+- Tested: Search by sender returns matching emails (LIKE pattern)
+- Tested: Search by subject returns matching emails
+- Tested: Search by date range using ISO 8601 → NSDate conversion
+- Tested: Combined sender + subject filters narrow results correctly
+- Tested: No results for non-matching queries returns empty array
+- Tested: Results have same EmailSummary shape as list output
+- Tested: `rowid_from_emlx_path` extracts IDs including partial files
+- Tested: Body text search uses `mdfind` (Spotlight) and intersects with metadata
+- Expected: All acceptance criteria from search spec
+- Actual: All criteria met
+**Issues:** None
+
+### Feature 5: Triage Labels
+**Score:** Pass
+**Evidence:**
+- Tested: Assign label 1-5 stores in overlay DB with correct label_number
+- Tested: Assigning new label replaces existing (upsert behavior)
+- Tested: Label 0 clears the label (DELETE from labels table)
+- Tested: Invalid label (6+) returns error
+- Tested: `get_all_labels` returns map for batch joining
+- Tested: Labels persist across DB connections (tempfile test)
+- Tested: Label filter works with pagination (regression test)
+- Tested: Untriaged filter with pagination returns correct counts
+- Expected: All acceptance criteria from triage-labels spec
+- Actual: All criteria met
+**Issues:** None
+
+### Feature 6: Mail Actions
 **Score:** Partial
 **Evidence:**
-- Tested: `test_list_emails_on_mock_db`, `test_list_emails_pagination`, `test_list_emails_folder_filter` — all pass
-- Expected: Listings filtered by label or untriaged status return correct paginated results
-- Actual: Core listing (no filters) works perfectly. Pagination, folder filter, date sort, read status all correct.
-- **Bug:** Label and untriaged filters are applied AFTER pagination from the Envelope Index (mea.rs:90-114). Flow: fetch page N of size S from DB → join labels → then filter. This means `mea list --label 1 --page 0 --page-size 20` fetches the first 20 inbox emails and then retains only those with label 1. If none of the first 20 have label 1, the result is empty even though labeled emails exist later. Same issue with `--untriaged`. The filter should be applied before or during the SQL query, not after pagination.
+- Tested: Delete/archive/flag/mark-read commands exist with correct AppleScript generation
+- Tested: `--yes` flag bypasses confirmation; without it, returns confirmation JSON
+- Tested: AppleScript string escaping handles quotes and backslashes
+- Tested: VIP bulk action test confirms VIP exclusion response
+- **BUG FOUND:** `bulk_action()` at `src/actions.rs:124` — when VIP emails are present in the ID list and `force=false`, the function returns early with `success: false` and `message_ids_acted: []`, meaning **zero emails are processed** including non-VIP ones. Both `cmd_delete` and `cmd_archive` in `src/bin/mea.rs:222,267` always pass `force=false`.
+- Expected per spec: "VIP-protected emails are excluded from bulk delete/archive unless explicitly targeted by ID" — VIPs should be silently skipped, non-VIP emails should still be processed.
+- Actual: If ANY VIP email is in a bulk delete/archive, ALL emails (including non-VIP) are blocked. The `force` parameter exists but is never set to `true` by any CLI command, making it unreachable. Even explicitly targeting a single VIP email by ID fails.
+- Impact: Any bulk delete/archive containing even one VIP email does nothing.
 **Issues:**
-- **Major:** Post-pagination filtering (mea.rs:104-114) produces incorrect results for `--label` and `--untriaged` flags
+1. `bulk_action` should skip VIP emails and process non-VIP ones (not block everything)
+2. The `force` parameter is dead code — never set to `true` by any caller
+3. Explicitly targeting a VIP email by ID should work per spec ("unless explicitly targeted by ID") but doesn't
 
-### Feature 2: Body Reading
+### Feature 7: Auto-Triage
 **Score:** Pass
 **Evidence:**
-- Tested: All 8 body tests pass (cache roundtrip, emlx parsing, plain/HTML, upsert, persistence)
-- Expected: Body with headers, HTML→markdown, caching
-- Actual: Body parsing works. HTML converted via html2text. Cache stores to/cc from .emlx headers (migration v2). Cached reads return to/cc correctly.
+- Tested: Receipts matching receipt pattern get label 5
+- Tested: Doordash emails matching trash rule are trashed (dry_run verified)
+- Tested: VIP sender emails auto-labeled Follow Up (label 1)
+- Tested: VIP emails never trashed even when matching trash rules
+- Tested: Unmatched emails increment untriaged counter
+- Tested: Summary includes labeled/trashed/archived/untriaged/total counts
+- Tested: Idempotent — second run skips already-labeled emails
+- Tested: Combined scenario (4 emails: receipt, doordash, friend, VIP) produces correct counts
+- Expected: All acceptance criteria from auto-triage spec
+- Actual: All criteria met. Note: auto-triage correctly bypasses the bulk_action issue by calling `delete_email`/`archive_email` individually per email with its own VIP check.
 **Issues:** None
 
-### Feature 3: Search
+### Feature 8: Rules Engine
 **Score:** Pass
 **Evidence:**
-- Tested: All 7 search tests pass (sender, subject, date range, combined, no results, shape match)
-- Expected: Metadata search via SQL, body search via Spotlight, combined intersection
-- Actual: SQL LIKE queries work. Date iso8601↔nsdate conversion correct. Spotlight integration via mdfind coded with proper intersection logic.
+- Tested: TOML config load/save roundtrip preserves all rules and VIP senders
+- Tested: Missing config file returns empty defaults (no error)
+- Tested: VIP sender match is case-insensitive
+- Tested: VIP takes priority over all other rules
+- Tested: First match wins for ordered rules
+- Tested: sender_contains, sender_exact, subject_contains, and any_of criteria all work
+- Tested: Rule actions: label (with label_number), trash, archive
+- Expected: All acceptance criteria from rules-engine spec
+- Actual: All criteria met
 **Issues:** None
 
-### Feature 4: Triage Labels
+### Feature 9: Overlay DB
 **Score:** Pass
 **Evidence:**
-- Tested: All 9 label tests pass (assign, replace, clear, invalid, by-label, untriaged, persistence, get_all)
-- Expected: Assign 1-5, clear with 0, filter, persist
-- Actual: All criteria met. CHECK constraint on label_number. Upsert on re-assign. DELETE on clear.
+- Tested: DB auto-created with in-memory and file-based connections
+- Tested: Schema version tracked; migrations run to version 2
+- Tested: Migration is idempotent (running twice doesn't error)
+- Tested: email_identity table stores rowid + message_id mapping
+- Tested: Identity upsert updates message_id for existing rowid
+- Tested: labels and cached_bodies tables exist with correct constraints
+- Tested: Migration v2 adds cached_to and cached_cc columns
+- Tested: Data persists across connection close/reopen (tempfile tests)
+- Expected: All acceptance criteria from overlay-db spec
+- Actual: All criteria met
 **Issues:** None
 
-### Feature 5: Mail Actions
+### Feature 10: Skill Wrapper
 **Score:** Pass
 **Evidence:**
-- Tested: `test_bulk_action_vip_protection`, `test_vip_emails_excluded_from_bulk`, `test_escape_applescript` — all pass
-- Expected: VIP excluded from bulk actions, AppleScript escaping, confirmation flow
-- Actual: VIP protection works. `escape_applescript` (actions.rs:45-47) properly escapes backslashes and double quotes. Confirmation flow returns ConfirmationResponse without --yes. Auto-triage uses direct calls (not bulk_action) with its own VIP check.
-- **Design note:** `bulk_action` returns early with warning when VIPs are in batch (actions.rs:124-142) rather than executing non-VIP emails. This is a conservative safety design — the spec says "excluded from bulk actions" which could mean either approach. The auto-triage path bypasses this entirely.
-**Issues:** None functional
-
-### Feature 6: Auto-Triage
-**Score:** Pass
-**Evidence:**
-- Tested: All 7 triage tests pass (receipts labeled, trash match, VIP follow-up, VIP never trashed, no-match untriaged, idempotent, counts)
-- Expected: Rule evaluation, VIP priority, idempotency, dry-run, summary
-- Actual: All criteria met. Idempotency via get_label check. VIP always wins. Dry-run skips AppleScript. Warnings stored in summary.warnings (not stderr).
-**Issues:** None
-
-### Feature 7: Rules Engine
-**Score:** Pass
-**Evidence:**
-- Tested: All 12 rules tests pass (VIP always/case-insensitive, receipt, food-trash, any_of, no-match, first-wins, VIP priority, roundtrip, missing-file, sender_exact)
-- Expected: TOML config, VIP management, sender/subject matching, first-match-wins
-- Actual: All criteria met. TOML serde works. `any_of` composite matching. `sender_exact` case-insensitive. Default empty config on missing file.
-**Issues:** None
-
-### Feature 8: CLI Interface
-**Score:** Pass
-**Evidence:**
-- Tested: All 11 CLI tests + 4 integration tests pass
-- Expected: `mea` binary, JSON output, structured errors, exit codes, --yes, no stderr
-- Actual: Binary named `mea`. All output valid JSON. Exit code 1 on error (mea.rs:10-16, verified by `test_exit_code_nonzero_on_error`). No stderr (verified by `test_no_stderr_on_error`). Confirmation flow for destructive ops without --yes.
+- Tested: SKILL.md exists at project root with comprehensive skill definition
+- Tested: Documents all `mea` CLI commands with correct syntax
+- Tested: Triage workflow described (dry-run → approve → execute → manual review)
+- Tested: References PATTERNS.md for learned preferences
+- Tested: Documents rules.toml editing with TOML example
+- Tested: Notes VIP protection, --yes requirement, JSON output parsing
+- Tested: Integration test confirms PATTERNS.md bootstrapping on first run
+- Expected: All acceptance criteria from skill-wrapper spec
+- Actual: All criteria met
 **Issues:** None
 
 ## Back-Pressure Results
 
 | Check | Status | Details |
 |-------|--------|---------|
-| Build | PASS | Clean build, no warnings |
-| Tests | PASS | 78/78 passing (74 unit + 4 integration), 0 failing |
-| Lint | PASS | 0 clippy warnings (with -D warnings) |
-| Typecheck | PASS | Covered by Rust compiler build |
-| Format | PASS | 0 unformatted files |
+| Build | PASS | Compiles cleanly with no warnings |
+| Tests | PASS | 81/81 passing (77 unit + 4 integration) |
+| Lint | PASS | clippy clean with `-D warnings` |
+| Typecheck | PASS | (covered by build — Rust compiler) |
+| Format | PASS | `cargo fmt --check` reports no issues |
 
 ## Code Quality Issues
 
@@ -110,17 +187,19 @@ features_fail: 0
 - None
 
 ### Major
-- **Post-pagination label/untriaged filtering** (mea.rs:104-114): `--label` and `--untriaged` filters applied after SQL pagination. Returns wrong subsets — filtered results depend on which emails happen to be in the current page, not on which emails match the filter. Should push filtering into the SQL query or fetch all results before filtering.
+- **VIP bulk action blocks all emails** (`src/actions.rs:124`): When any VIP email is in a bulk delete/archive list, `bulk_action` returns early without processing ANY email (including non-VIP ones). The `force` parameter that would bypass this is never set to `true` by any CLI command. Fix: skip VIP emails silently and process the rest, or expose `--force` in the CLI.
 
 ### Minor
-- **cli::error fallback not JSON-safe** (cli.rs:136): Fallback format string `format!(r#"..."error":"{message}"..."#)` doesn't escape quotes. Only reachable if serde_json serialization fails (near-impossible), but technically incorrect.
-- **AppleScript targets inbox only** (actions.rs:53,68,84,100): All AppleScript commands use `every message of inbox`. Flag/mark-read won't work on emails in other mailboxes.
-- **Unused public functions**: `find_rowid_by_message_id` (db.rs:99), `get_emails_by_label` (labels.rs:88), `get_untriaged` (labels.rs:105) — tested but never called from CLI or other modules. The triage command reimplements untriaged logic inline (mea.rs:357-362) instead of using `get_untriaged`.
-- **bulk_action blocks all on VIP presence** (actions.rs:124-142): When any VIP is in batch and force=false, returns early without actioning non-VIP emails. `force` parameter is never set to true from CLI. Functionally this means the user must manually remove VIP IDs from their batch.
+- **Dead code — `db::find_rowid_by_message_id`** (`src/db.rs:99`): Public function only used in its own test. Intended for index rebuild recovery but not called by any production code path.
+- **Dead code — `labels::get_emails_by_label`** (`src/labels.rs:88`): Public function only used in its own test. No production caller.
+- **Dead code — `labels::get_untriaged`** (`src/labels.rs:105`): Public function only used in its own test. The untriaged logic in `list_emails_filtered` uses `get_all_labels` + retain instead.
+- **Dead code — `rules::save_rules`** (`src/rules.rs:85`): Only used in test. The skill wrapper edits rules.toml directly, but the function exists for potential programmatic use.
+- **Spotlight query injection** (`src/search.rs:128`): Body text containing single quotes (`'`) in the mdfind query `kMDItemTextContent == '*{body_text}*'cd` could break the Spotlight query. Not a security risk (mdfind doesn't execute commands) but causes search failures for queries with apostrophes.
+- **Hardcoded triage limit** (`src/bin/mea.rs:338`): `cmd_triage` fetches up to 10000 emails. Users with >10000 inbox emails would have some emails missed by auto-triage.
 
 ## Recommendations
 
-1. **Fix label/untriaged filtering**: Either push the filter into the SQL query (JOIN with overlay labels table) or fetch all results and filter before pagination. This is the only functional bug affecting correctness.
-2. **Wire up `get_untriaged`**: The cmd_triage function reimplements this inline — use the existing helper from labels.rs instead.
-3. **Consider broadening AppleScript scope**: Search all mailboxes, not just inbox, for flag/mark-read actions.
-4. **Clean up unused functions**: Either call `find_rowid_by_message_id` for index rebuild recovery or remove it.
+1. **Fix VIP bulk action logic** — `bulk_action` should silently skip VIP emails and process non-VIP ones instead of blocking the entire operation. Consider also exposing a `--force` flag to override VIP protection when explicitly desired.
+2. **Escape body text for mdfind** — sanitize single quotes in Spotlight queries to prevent search failures.
+3. **Remove or annotate dead code** — `find_rowid_by_message_id`, `get_emails_by_label`, `get_untriaged` are unused in production. Either remove them or add `#[allow(dead_code)]` with a comment explaining future intent.
+4. **Make triage page size configurable** — replace the hardcoded 10000 limit with a configurable value or loop until all emails are processed.
