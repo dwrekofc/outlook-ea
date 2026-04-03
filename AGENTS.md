@@ -7,9 +7,10 @@ This project is super green field and no one is using it yet. we are focused on 
 ## Build & Run
 
 - Language: Rust (edition 2024)
-- UI Framework: GPUI (from Zed)
+- Binary: `mea` (CLI tool, JSON output, agent-facing)
+- Library: `src/lib.rs` with modules: db, data, labels, body, search, rules, actions, triage, cli
 - Build: `cargo build`
-- Run: `cargo run`
+- Run: `cargo run -- <command>` (e.g., `cargo run -- list`)
 
 ## Validation
 
@@ -20,3 +21,11 @@ This project is super green field and no one is using it yet. we are focused on 
 ## Operational Notes
 
 ### Codebase Patterns
+
+- Apple Mail dates use NSDate epoch (seconds since 2001-01-01, offset 978307200 from Unix epoch)
+- Overlay DB at `~/.mea/overlay.db` (SQLite, user metadata not in Apple Mail)
+- Rules config at `~/.mea/rules.toml` (TOML, editable by Claude skill)
+- Apple Mail Envelope Index at `~/Library/Mail/V*/MailData/Envelope Index` (read-only SQLite)
+- Email files are `.emlx` format under `~/Library/Mail/V*/` (first line = byte count, then RFC 2822 message)
+- `test_bulk_action_no_vip` test takes ~120s because osascript hangs in test env — expected behavior
+- All tests use in-memory SQLite mocks for Envelope Index — no real Mail.app dependency in tests
