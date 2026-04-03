@@ -87,31 +87,18 @@ fn cmd_list(
         Err(e) => return cli::error(&e, "OVERLAY_ERROR"),
     };
 
-    let mut result = match data::list_emails(&envelope_conn, folder.as_deref(), page, page_size) {
+    let result = match data::list_emails_filtered(
+        &envelope_conn,
+        &overlay_conn,
+        folder.as_deref(),
+        page,
+        page_size,
+        label_filter,
+        untriaged,
+    ) {
         Ok(r) => r,
         Err(e) => return cli::error(&e.to_string(), "LIST_ERROR"),
     };
-
-    // Join labels from overlay DB
-    let label_map = labels::get_all_labels(&overlay_conn).unwrap_or_default();
-    for email in &mut result.emails {
-        email.label = label_map.get(&email.id).copied();
-
-        // Store identity mapping
-        let _ = db::ensure_identity(&overlay_conn, email.id, &email.message_id);
-    }
-
-    // Apply label filter
-    if let Some(lbl) = label_filter {
-        result.emails.retain(|e| e.label == Some(lbl));
-        result.total_count = result.emails.len();
-    }
-
-    // Apply untriaged filter
-    if untriaged {
-        result.emails.retain(|e| e.label.is_none());
-        result.total_count = result.emails.len();
-    }
 
     cli::success(&result)
 }

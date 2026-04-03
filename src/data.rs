@@ -4,6 +4,8 @@ use serde::Serialize;
 use std::path::{Path, PathBuf};
 use thiserror::Error;
 
+use crate::{db, labels};
+
 #[derive(Error, Debug)]
 pub enum DataError {
     #[error("SQLite error: {0}")]
@@ -177,6 +179,71 @@ pub fn list_emails(
     })
 }
 
+/// List emails with label/untriaged filtering applied BEFORE pagination.
+///
+/// When `label_filter` or `untriaged` is set, fetches all matching emails from
+/// the envelope, joins labels, filters, then paginates. When neither is set,
+/// uses the normal SQL-level pagination for efficiency.
+pub fn list_emails_filtered(
+    envelope_conn: &Connection,
+    overlay_conn: &Connection,
+    folder: Option<&str>,
+    page: usize,
+    page_size: usize,
+    label_filter: Option<u8>,
+    untriaged: bool,
+) -> DataResult<ListResponse> {
+    let needs_label_filter = label_filter.is_some() || untriaged;
+
+    // When filtering by label/untriaged, fetch all emails (no SQL pagination)
+    // so we can filter correctly before paginating
+    let (fetch_page, fetch_size) = if needs_label_filter {
+        (0, usize::MAX)
+    } else {
+        (page, page_size)
+    };
+
+    let mut result = list_emails(envelope_conn, folder, fetch_page, fetch_size)?;
+
+    // Join labels from overlay DB
+    let label_map = labels::get_all_labels(overlay_conn).unwrap_or_default();
+    for email in &mut result.emails {
+        email.label = label_map.get(&email.id).copied();
+        let _ = db::ensure_identity(overlay_conn, email.id, &email.message_id);
+    }
+
+    if needs_label_filter {
+        // Apply label filter
+        if let Some(lbl) = label_filter {
+            result.emails.retain(|e| e.label == Some(lbl));
+        }
+
+        // Apply untriaged filter
+        if untriaged {
+            result.emails.retain(|e| e.label.is_none());
+        }
+
+        // Manual pagination after filtering
+        let total_count = result.emails.len();
+        let offset = page * page_size;
+        let emails: Vec<_> = result
+            .emails
+            .into_iter()
+            .skip(offset)
+            .take(page_size)
+            .collect();
+
+        Ok(ListResponse {
+            emails,
+            total_count,
+            page,
+            page_size,
+        })
+    } else {
+        Ok(result)
+    }
+}
+
 /// Parse "Name <address>" or bare address formats.
 pub fn parse_sender(raw: &str) -> (String, String) {
     if let Some(lt) = raw.find('<')
@@ -203,6 +270,84 @@ pub fn nsdate_to_iso8601(nsdate: f64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::db::open_overlay_db_memory;
+
+    fn mock_envelope(n: usize) -> Connection {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE mailboxes (ROWID INTEGER PRIMARY KEY, url TEXT);
+             CREATE TABLE messages (
+                ROWID INTEGER PRIMARY KEY, message_id TEXT, sender TEXT,
+                subject TEXT, date_sent REAL, read INTEGER, flagged INTEGER, mailbox INTEGER
+             );
+             INSERT INTO mailboxes VALUES (1, 'imap://user@server/INBOX');",
+        )
+        .unwrap();
+        for i in 1..=n {
+            conn.execute(
+                "INSERT INTO messages VALUES (?1, ?2, ?3, ?4, ?5, 0, 0, 1)",
+                rusqlite::params![
+                    i as i64,
+                    format!("msg{i}@test"),
+                    format!("User{i} <user{i}@test.com>"),
+                    format!("Subject {i}"),
+                    (i as f64) * 100.0,
+                ],
+            )
+            .unwrap();
+        }
+        conn
+    }
+
+    #[test]
+    fn test_label_filter_finds_emails_beyond_first_page() {
+        // Regression: label filter must be applied BEFORE pagination.
+        // With 10 emails and page_size=3, labeling email #8 (which is on page 3
+        // in date-desc order) should still appear when filtering by that label.
+        let envelope = mock_envelope(10);
+        let overlay = open_overlay_db_memory().unwrap();
+
+        // Label email rowid=3 with label 1 (this email has date 300.0,
+        // so it's near the end in date-desc order)
+        labels::assign_label(&overlay, 3, "msg3@test", 1).unwrap();
+
+        // Without the fix, page 0 size 5 fetches the 5 newest emails (10,9,8,7,6)
+        // then filters — email 3 is not in that page so result would be empty.
+        let result = list_emails_filtered(&envelope, &overlay, None, 0, 5, Some(1), false).unwrap();
+        assert_eq!(result.total_count, 1);
+        assert_eq!(result.emails.len(), 1);
+        assert_eq!(result.emails[0].id, 3);
+    }
+
+    #[test]
+    fn test_untriaged_filter_correct_pagination() {
+        // 5 emails, label 2 of them → 3 untriaged
+        // With page_size=2, page 0 should have 2 untriaged, page 1 should have 1
+        let envelope = mock_envelope(5);
+        let overlay = open_overlay_db_memory().unwrap();
+
+        labels::assign_label(&overlay, 5, "msg5@test", 1).unwrap();
+        labels::assign_label(&overlay, 3, "msg3@test", 2).unwrap();
+
+        let page0 = list_emails_filtered(&envelope, &overlay, None, 0, 2, None, true).unwrap();
+        assert_eq!(page0.total_count, 3);
+        assert_eq!(page0.emails.len(), 2);
+
+        let page1 = list_emails_filtered(&envelope, &overlay, None, 1, 2, None, true).unwrap();
+        assert_eq!(page1.total_count, 3);
+        assert_eq!(page1.emails.len(), 1);
+    }
+
+    #[test]
+    fn test_no_filter_uses_sql_pagination() {
+        // Without filters, pagination should come from SQL (same as before)
+        let envelope = mock_envelope(5);
+        let overlay = open_overlay_db_memory().unwrap();
+
+        let result = list_emails_filtered(&envelope, &overlay, None, 0, 3, None, false).unwrap();
+        assert_eq!(result.total_count, 5);
+        assert_eq!(result.emails.len(), 3);
+    }
 
     #[test]
     fn test_parse_sender_with_name() {
