@@ -3,6 +3,7 @@ pub mod body;
 pub mod cli;
 pub mod data;
 pub mod db;
+pub mod graph;
 pub mod labels;
 pub mod rules;
 pub mod search;

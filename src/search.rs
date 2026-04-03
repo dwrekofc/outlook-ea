@@ -3,7 +3,8 @@ use serde::{Deserialize, Serialize};
 use std::process::Command;
 use thiserror::Error;
 
-use crate::data::{EmailSummary, nsdate_to_iso8601, parse_sender};
+use crate::data::{EmailSummary, folder_from_url, unix_to_iso8601};
+use crate::graph;
 
 #[derive(Error, Debug)]
 pub enum SearchError {
@@ -32,7 +33,8 @@ pub struct SearchResponse {
     pub total_count: usize,
 }
 
-/// Search emails using metadata filters against the Envelope Index.
+/// Search emails using metadata filters against the V10 Envelope Index.
+/// Joins subjects, addresses, and message_global_data lookup tables.
 pub fn search_metadata(
     envelope_conn: &Connection,
     query: &SearchQuery,
@@ -42,42 +44,52 @@ pub fn search_metadata(
     let mut param_idx = 1;
 
     if let Some(ref sender) = query.sender {
-        conditions.push(format!("m.sender LIKE ?{param_idx}"));
+        conditions.push(format!(
+            "(a.address LIKE ?{pi} OR a.comment LIKE ?{pi})",
+            pi = param_idx
+        ));
         params.push(Box::new(format!("%{sender}%")));
         param_idx += 1;
     }
 
     if let Some(ref subject) = query.subject {
-        conditions.push(format!("m.subject LIKE ?{param_idx}"));
+        conditions.push(format!("sub.subject LIKE ?{param_idx}"));
         params.push(Box::new(format!("%{subject}%")));
         param_idx += 1;
     }
 
-    if let Some(ref date_from) = query.date_from {
-        // Convert ISO 8601 to NSDate
-        if let Some(nsdate) = iso8601_to_nsdate(date_from) {
-            conditions.push(format!("m.date_sent >= ?{param_idx}"));
-            params.push(Box::new(nsdate));
-            param_idx += 1;
-        }
+    if let Some(ref date_from) = query.date_from
+        && let Some(unix_ts) = iso8601_to_unix(date_from)
+    {
+        conditions.push(format!("m.date_sent >= ?{param_idx}"));
+        params.push(Box::new(unix_ts));
+        param_idx += 1;
     }
 
     if let Some(ref date_to) = query.date_to
-        && let Some(nsdate) = iso8601_to_nsdate(date_to)
+        && let Some(unix_ts) = iso8601_to_unix(date_to)
     {
         conditions.push(format!("m.date_sent <= ?{param_idx}"));
-        params.push(Box::new(nsdate));
+        params.push(Box::new(unix_ts));
         param_idx += 1;
     }
     let _ = param_idx;
 
     let where_clause = conditions.join(" AND ");
     let sql = format!(
-        "SELECT m.ROWID, COALESCE(m.message_id, ''), COALESCE(m.sender, ''),
-                COALESCE(m.subject, ''), COALESCE(m.date_sent, 0),
-                COALESCE(m.read, 0), COALESCE(mb.url, '')
+        "SELECT m.ROWID,
+                COALESCE(mgd.message_id_header, '') as message_id,
+                COALESCE(a.comment, '') as sender_name,
+                COALESCE(a.address, '') as sender_address,
+                COALESCE(m.subject_prefix, '') || COALESCE(sub.subject, '') as subject,
+                COALESCE(m.date_sent, 0) as date_sent,
+                COALESCE(m.read, 0) as is_read,
+                COALESCE(mb.url, '') as folder_url
          FROM messages m
+         JOIN subjects sub ON m.subject = sub.ROWID
+         JOIN addresses a ON m.sender = a.ROWID
          JOIN mailboxes mb ON m.mailbox = mb.ROWID
+         LEFT JOIN message_global_data mgd ON mgd.ROWID = m.global_message_id
          WHERE {where_clause}
          ORDER BY m.date_sent DESC"
     );
@@ -86,30 +98,24 @@ pub fn search_metadata(
     let rows = stmt.query_map(rusqlite::params_from_iter(&params), |row| {
         let rowid: i64 = row.get(0)?;
         let message_id: String = row.get(1)?;
-        let sender_raw: String = row.get(2)?;
-        let subject: String = row.get(3)?;
-        let date_sent: f64 = row.get(4)?;
-        let read: i32 = row.get(5)?;
-        let folder_url: String = row.get(6)?;
-
-        let (name, addr) = parse_sender(&sender_raw);
-        let date_str = nsdate_to_iso8601(date_sent);
-        let folder_name = folder_url
-            .rsplit('/')
-            .find(|s| !s.is_empty())
-            .unwrap_or("Unknown")
-            .to_string();
+        let sender_name: String = row.get(2)?;
+        let sender_address: String = row.get(3)?;
+        let subject: String = row.get(4)?;
+        let date_sent: i64 = row.get(5)?;
+        let read: i32 = row.get(6)?;
+        let folder_url: String = row.get(7)?;
 
         Ok(EmailSummary {
             id: rowid,
             message_id,
-            sender_name: name,
-            sender_address: addr,
+            sender_name,
+            sender_address,
             subject,
-            date: date_str,
+            date: unix_to_iso8601(date_sent),
             is_read: read != 0,
-            folder: folder_name,
+            folder: folder_from_url(&folder_url),
             label: None,
+            sender_context: None,
         })
     })?;
 
@@ -155,9 +161,11 @@ pub fn rowid_from_emlx_path(path: &str) -> Option<i64> {
 }
 
 /// Combined search: metadata + optional body text via Spotlight.
+/// When `overlay_conn` is provided, enriches results with sender context from the graph.
 pub fn search_emails(
     envelope_conn: &Connection,
     query: &SearchQuery,
+    overlay_conn: Option<&Connection>,
 ) -> SearchResult<SearchResponse> {
     let mut metadata_results = search_metadata(envelope_conn, query)?;
 
@@ -183,11 +191,19 @@ pub fn search_emails(
                     .collect::<Vec<_>>()
                     .join(",");
                 let sql = format!(
-                    "SELECT m.ROWID, COALESCE(m.message_id, ''), COALESCE(m.sender, ''),
-                            COALESCE(m.subject, ''), COALESCE(m.date_sent, 0),
-                            COALESCE(m.read, 0), COALESCE(mb.url, '')
+                    "SELECT m.ROWID,
+                            COALESCE(mgd.message_id_header, '') as message_id,
+                            COALESCE(a.comment, '') as sender_name,
+                            COALESCE(a.address, '') as sender_address,
+                            COALESCE(m.subject_prefix, '') || COALESCE(sub.subject, '') as subject,
+                            COALESCE(m.date_sent, 0) as date_sent,
+                            COALESCE(m.read, 0) as is_read,
+                            COALESCE(mb.url, '') as folder_url
                      FROM messages m
+                     JOIN subjects sub ON m.subject = sub.ROWID
+                     JOIN addresses a ON m.sender = a.ROWID
                      JOIN mailboxes mb ON m.mailbox = mb.ROWID
+                     LEFT JOIN message_global_data mgd ON mgd.ROWID = m.global_message_id
                      WHERE m.ROWID IN ({placeholders})
                      ORDER BY m.date_sent DESC"
                 );
@@ -199,30 +215,24 @@ pub fn search_emails(
                 let rows = stmt.query_map(rusqlite::params_from_iter(&params), |row| {
                     let rowid: i64 = row.get(0)?;
                     let message_id: String = row.get(1)?;
-                    let sender_raw: String = row.get(2)?;
-                    let subject: String = row.get(3)?;
-                    let date_sent: f64 = row.get(4)?;
-                    let read: i32 = row.get(5)?;
-                    let folder_url: String = row.get(6)?;
-
-                    let (name, addr) = parse_sender(&sender_raw);
-                    let date_str = nsdate_to_iso8601(date_sent);
-                    let folder_name = folder_url
-                        .rsplit('/')
-                        .find(|s| !s.is_empty())
-                        .unwrap_or("Unknown")
-                        .to_string();
+                    let sender_name: String = row.get(2)?;
+                    let sender_address: String = row.get(3)?;
+                    let subject: String = row.get(4)?;
+                    let date_sent: i64 = row.get(5)?;
+                    let read: i32 = row.get(6)?;
+                    let folder_url: String = row.get(7)?;
 
                     Ok(EmailSummary {
                         id: rowid,
                         message_id,
-                        sender_name: name,
-                        sender_address: addr,
+                        sender_name,
+                        sender_address,
                         subject,
-                        date: date_str,
+                        date: unix_to_iso8601(date_sent),
                         is_read: read != 0,
-                        folder: folder_name,
+                        folder: folder_from_url(&folder_url),
                         label: None,
+                        sender_context: None,
                     })
                 })?;
                 metadata_results = rows.filter_map(|r| r.ok()).collect();
@@ -238,6 +248,25 @@ pub fn search_emails(
         }
     }
 
+    // Enrich with sender context from graph if overlay connection is available
+    if let Some(ov_conn) = overlay_conn {
+        let mut seen: std::collections::HashMap<String, Option<graph::SenderContext>> =
+            std::collections::HashMap::new();
+        for email in &mut metadata_results {
+            if email.sender_address.is_empty() {
+                continue;
+            }
+            let ctx = seen.entry(email.sender_address.clone()).or_insert_with(|| {
+                graph::get_sender_context(ov_conn, &email.sender_address)
+                    .ok()
+                    .flatten()
+            });
+            if let Some(sc) = ctx.as_ref() {
+                email.sender_context = Some(sc.clone());
+            }
+        }
+    }
+
     let total_count = metadata_results.len();
     Ok(SearchResponse {
         emails: metadata_results,
@@ -245,29 +274,42 @@ pub fn search_emails(
     })
 }
 
-/// Convert ISO 8601 date string to NSDate (seconds since 2001-01-01).
-fn iso8601_to_nsdate(iso: &str) -> Option<f64> {
-    const NS_EPOCH_OFFSET: i64 = 978_307_200;
+/// Convert ISO 8601 date string to Unix epoch seconds.
+fn iso8601_to_unix(iso: &str) -> Option<i64> {
     let dt = chrono::DateTime::parse_from_rfc3339(iso).ok()?;
-    Some((dt.timestamp() - NS_EPOCH_OFFSET) as f64)
+    Some(dt.timestamp())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    /// Create a mock Envelope Index matching V10 normalized schema.
     fn mock_envelope_db() -> Connection {
         let conn = Connection::open_in_memory().unwrap();
         conn.execute_batch(
-            "CREATE TABLE mailboxes (ROWID INTEGER PRIMARY KEY, url TEXT);
+            "CREATE TABLE mailboxes (ROWID INTEGER PRIMARY KEY, url TEXT COLLATE BINARY);
+             CREATE TABLE subjects (ROWID INTEGER PRIMARY KEY, subject TEXT);
+             CREATE TABLE addresses (ROWID INTEGER PRIMARY KEY, address TEXT, comment TEXT);
+             CREATE TABLE message_global_data (ROWID INTEGER PRIMARY KEY, message_id INTEGER, message_id_header TEXT);
              CREATE TABLE messages (
-                ROWID INTEGER PRIMARY KEY, message_id TEXT, sender TEXT,
-                subject TEXT, date_sent REAL, read INTEGER, flagged INTEGER, mailbox INTEGER
+                ROWID INTEGER PRIMARY KEY, message_id INTEGER DEFAULT 0, global_message_id INTEGER,
+                subject_prefix TEXT, sender INTEGER, subject INTEGER,
+                date_sent INTEGER, read INTEGER DEFAULT 0, flagged INTEGER DEFAULT 0,
+                deleted INTEGER DEFAULT 0, mailbox INTEGER
              );
-             INSERT INTO mailboxes VALUES (1, 'imap://user@server/INBOX');
-             INSERT INTO messages VALUES (1, 'msg1@test', 'Alice Smith <alice@example.com>', 'Project Update', 725760000.0, 0, 0, 1);
-             INSERT INTO messages VALUES (2, 'msg2@test', 'Bob Jones <bob@example.com>', 'Meeting Tomorrow', 725760100.0, 1, 0, 1);
-             INSERT INTO messages VALUES (3, 'msg3@test', 'Alice Smith <alice@example.com>', 'Invoice #123', 725760200.0, 0, 0, 1);",
+             INSERT INTO mailboxes VALUES (1, 'ews://test-uuid/Inbox');
+             INSERT INTO subjects VALUES (1, 'Project Update');
+             INSERT INTO subjects VALUES (2, 'Meeting Tomorrow');
+             INSERT INTO subjects VALUES (3, 'Invoice #123');
+             INSERT INTO addresses VALUES (1, 'alice@example.com', 'Alice Smith');
+             INSERT INTO addresses VALUES (2, 'bob@example.com', 'Bob Jones');
+             INSERT INTO message_global_data VALUES (1, 1, 'msg1@test');
+             INSERT INTO message_global_data VALUES (2, 2, 'msg2@test');
+             INSERT INTO message_global_data VALUES (3, 3, 'msg3@test');
+             INSERT INTO messages VALUES (1, 0, 1, '', 1, 1, 1704067200, 0, 0, 0, 1);
+             INSERT INTO messages VALUES (2, 0, 2, '', 2, 2, 1704067300, 1, 0, 0, 1);
+             INSERT INTO messages VALUES (3, 0, 3, '', 1, 3, 1704067400, 0, 0, 0, 1);",
         ).unwrap();
         conn
     }
@@ -285,6 +327,18 @@ mod tests {
     }
 
     #[test]
+    fn test_search_by_sender_name() {
+        let conn = mock_envelope_db();
+        let query = SearchQuery {
+            sender: Some("Bob".to_string()),
+            ..Default::default()
+        };
+        let results = search_metadata(&conn, &query).unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].sender_name, "Bob Jones");
+    }
+
+    #[test]
     fn test_search_by_subject() {
         let conn = mock_envelope_db();
         let query = SearchQuery {
@@ -299,14 +353,13 @@ mod tests {
     #[test]
     fn test_search_by_date_range() {
         let conn = mock_envelope_db();
-        // NSDate 725760000 = 2024-01-01T00:00:00Z
-        // NSDate 725760100 = 2024-01-01T00:01:40Z
+        // 1704067300 = 2024-01-01T00:01:40Z
         let query = SearchQuery {
             date_from: Some("2024-01-01T00:01:00+00:00".to_string()),
             ..Default::default()
         };
         let results = search_metadata(&conn, &query).unwrap();
-        // Should get msg2 and msg3 (date_sent >= 725846460)
+        // Should get msg2 (1704067300) and msg3 (1704067400)
         assert_eq!(results.len(), 2);
     }
 
@@ -348,9 +401,9 @@ mod tests {
     }
 
     #[test]
-    fn test_iso8601_to_nsdate() {
-        let nsdate = iso8601_to_nsdate("2024-01-01T00:00:00+00:00").unwrap();
-        assert_eq!(nsdate, 725760000.0);
+    fn test_iso8601_to_unix() {
+        let unix = iso8601_to_unix("2024-01-01T00:00:00+00:00").unwrap();
+        assert_eq!(unix, 1704067200);
     }
 
     #[test]
@@ -358,7 +411,6 @@ mod tests {
         let conn = mock_envelope_db();
         let query = SearchQuery::default();
         let results = search_metadata(&conn, &query).unwrap();
-        // All results should have the EmailSummary shape
         for email in &results {
             assert!(email.id > 0);
             assert!(!email.date.is_empty());

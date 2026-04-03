@@ -25,3 +25,11 @@ target/
 
 # Cargo
 Cargo.lock
+
+# Ephemeral artifacts
+EVAL_REPORT*.md
+PROGRESS.md
+HANDOFF*.md
+MANIFEST.md
+main.rs
+benchmarks/

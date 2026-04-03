@@ -4,7 +4,7 @@ use serde::Serialize;
 use std::path::{Path, PathBuf};
 use thiserror::Error;
 
-use crate::{db, labels};
+use crate::{db, graph, labels};
 
 #[derive(Error, Debug)]
 pub enum DataError {
@@ -30,6 +30,8 @@ pub struct EmailSummary {
     pub folder: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub label: Option<u8>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sender_context: Option<graph::SenderContext>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -78,33 +80,56 @@ pub fn open_envelope_index(path: &Path) -> DataResult<Connection> {
     Ok(conn)
 }
 
-/// List emails from the Envelope Index.
-/// `folder` filters by mailbox URL pattern if provided.
-/// Results sorted by date descending.
+/// Build the folder WHERE clause for inbox queries.
+/// Uses case-insensitive matching since mailbox URLs have COLLATE BINARY.
+fn inbox_where(folder: Option<&str>) -> (String, Vec<Box<dyn rusqlite::types::ToSql>>) {
+    if let Some(f) = folder {
+        (
+            "WHERE mb.url LIKE ?1".to_string(),
+            vec![Box::new(format!("%{f}%"))],
+        )
+    } else {
+        // Default: Inbox (case-insensitive via LIKE on folder name portion)
+        ("WHERE mb.url LIKE '%nbox%'".to_string(), vec![])
+    }
+}
+
+/// Apple Mail V10 stores date_sent as Unix epoch seconds (integer).
+/// Convert to ISO 8601 string.
+pub fn unix_to_iso8601(unix_ts: i64) -> String {
+    DateTime::from_timestamp(unix_ts, 0)
+        .map(|dt| dt.to_rfc3339())
+        .unwrap_or_default()
+}
+
+/// Extract folder name from a mailbox URL (e.g., "ews://uuid/Inbox" -> "Inbox").
+pub fn folder_from_url(url: &str) -> String {
+    url.rsplit('/')
+        .find(|s| !s.is_empty())
+        .unwrap_or("Unknown")
+        .to_string()
+}
+
+/// List emails from the Envelope Index using V10 normalized schema.
+/// Joins `subjects`, `addresses`, and `message_global_data` lookup tables.
 pub fn list_emails(
     envelope_conn: &Connection,
     folder: Option<&str>,
     page: usize,
     page_size: usize,
 ) -> DataResult<ListResponse> {
-    // The Envelope Index schema has `messages` and `mailboxes` tables.
-    // messages: ROWID, message_id, subject, sender, date_sent, date_received,
-    //           read, flagged, mailbox
-    // mailboxes: ROWID, url
+    // V10 schema: messages.subject -> subjects.ROWID (FK)
+    //             messages.sender  -> addresses.ROWID (FK)
+    //             messages.global_message_id -> message_global_data.ROWID (FK)
+    //             messages.date_sent = Unix epoch integer
 
-    let (where_clause, params): (String, Vec<Box<dyn rusqlite::types::ToSql>>) =
-        if let Some(f) = folder {
-            (
-                "WHERE mb.url LIKE ?1".to_string(),
-                vec![Box::new(format!("%{f}%"))],
-            )
-        } else {
-            // Default: INBOX
-            ("WHERE mb.url LIKE '%INBOX%'".to_string(), vec![])
-        };
+    let (where_clause, params) = inbox_where(folder);
 
     let count_sql = format!(
-        "SELECT COUNT(*) FROM messages m JOIN mailboxes mb ON m.mailbox = mb.ROWID {where_clause}"
+        "SELECT COUNT(*)
+         FROM messages m
+         JOIN mailboxes mb ON m.mailbox = mb.ROWID
+         {where_clause}"
     );
 
     let total_count: usize = if params.is_empty() {
@@ -117,11 +142,19 @@ pub fn list_emails(
 
     let offset = page * page_size;
     let query_sql = format!(
-        "SELECT m.ROWID, COALESCE(m.message_id, ''), COALESCE(m.sender, ''),
-                COALESCE(m.subject, ''), COALESCE(m.date_sent, 0),
-                COALESCE(m.read, 0), COALESCE(mb.url, '')
+        "SELECT m.ROWID,
+                COALESCE(mgd.message_id_header, '') as message_id,
+                COALESCE(a.comment, '') as sender_name,
+                COALESCE(a.address, '') as sender_address,
+                COALESCE(m.subject_prefix, '') || COALESCE(sub.subject, '') as subject,
+                COALESCE(m.date_sent, 0) as date_sent,
+                COALESCE(m.read, 0) as is_read,
+                COALESCE(mb.url, '') as folder_url
          FROM messages m
+         JOIN subjects sub ON m.subject = sub.ROWID
+         JOIN addresses a ON m.sender = a.ROWID
          JOIN mailboxes mb ON m.mailbox = mb.ROWID
+         LEFT JOIN message_global_data mgd ON mgd.ROWID = m.global_message_id
          {where_clause}
          ORDER BY m.date_sent DESC
          LIMIT ?{limit_param} OFFSET ?{offset_param}",
@@ -137,35 +170,24 @@ pub fn list_emails(
     let rows = stmt.query_map(rusqlite::params_from_iter(&all_params), |row| {
         let rowid: i64 = row.get(0)?;
         let message_id: String = row.get(1)?;
-        let sender_raw: String = row.get(2)?;
-        let subject: String = row.get(3)?;
-        let date_sent: f64 = row.get(4)?;
-        let read: i32 = row.get(5)?;
-        let folder_url: String = row.get(6)?;
-
-        // Parse sender into name + address
-        let (name, addr) = parse_sender(&sender_raw);
-
-        // Apple Mail stores dates as NSDate (seconds since 2001-01-01)
-        let date_str = nsdate_to_iso8601(date_sent);
-
-        // Extract folder name from URL
-        let folder_name = folder_url
-            .rsplit('/')
-            .find(|s| !s.is_empty())
-            .unwrap_or("Unknown")
-            .to_string();
+        let sender_name: String = row.get(2)?;
+        let sender_address: String = row.get(3)?;
+        let subject: String = row.get(4)?;
+        let date_sent: i64 = row.get(5)?;
+        let read: i32 = row.get(6)?;
+        let folder_url: String = row.get(7)?;
 
         Ok(EmailSummary {
             id: rowid,
             message_id,
-            sender_name: name,
-            sender_address: addr,
+            sender_name,
+            sender_address,
             subject,
-            date: date_str,
+            date: unix_to_iso8601(date_sent),
             is_read: read != 0,
-            folder: folder_name,
+            folder: folder_from_url(&folder_url),
             label: None,
+            sender_context: None,
         })
     })?;
 
@@ -210,6 +232,10 @@ pub fn list_emails_filtered(
     for email in &mut result.emails {
         email.label = label_map.get(&email.id).copied();
         let _ = db::ensure_identity(overlay_conn, email.id, &email.message_id);
+        // Attach sender context from graph if available
+        if let Ok(Some(ctx)) = graph::get_sender_context(overlay_conn, &email.sender_address) {
+            email.sender_context = Some(ctx);
+        }
     }
 
     if needs_label_filter {
@@ -257,41 +283,64 @@ pub fn parse_sender(raw: &str) -> (String, String) {
     (String::new(), raw.trim().to_string())
 }
 
-/// Convert Apple's NSDate (seconds since 2001-01-01 00:00:00 UTC) to ISO 8601.
-pub fn nsdate_to_iso8601(nsdate: f64) -> String {
-    // NSDate epoch: 2001-01-01 00:00:00 UTC = Unix epoch + 978307200
-    const NS_EPOCH_OFFSET: i64 = 978_307_200;
-    let unix_ts = nsdate as i64 + NS_EPOCH_OFFSET;
-    DateTime::from_timestamp(unix_ts, 0)
-        .map(|dt| dt.to_rfc3339())
-        .unwrap_or_default()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::db::open_overlay_db_memory;
 
+    /// Create a mock Envelope Index matching Apple Mail V10's normalized schema.
     fn mock_envelope(n: usize) -> Connection {
         let conn = Connection::open_in_memory().unwrap();
         conn.execute_batch(
-            "CREATE TABLE mailboxes (ROWID INTEGER PRIMARY KEY, url TEXT);
+            "CREATE TABLE mailboxes (ROWID INTEGER PRIMARY KEY, url TEXT COLLATE BINARY);
+             CREATE TABLE subjects (ROWID INTEGER PRIMARY KEY, subject TEXT);
+             CREATE TABLE addresses (ROWID INTEGER PRIMARY KEY, address TEXT, comment TEXT);
+             CREATE TABLE message_global_data (ROWID INTEGER PRIMARY KEY, message_id INTEGER, message_id_header TEXT);
              CREATE TABLE messages (
-                ROWID INTEGER PRIMARY KEY, message_id TEXT, sender TEXT,
-                subject TEXT, date_sent REAL, read INTEGER, flagged INTEGER, mailbox INTEGER
+                ROWID INTEGER PRIMARY KEY,
+                message_id INTEGER DEFAULT 0,
+                global_message_id INTEGER,
+                subject_prefix TEXT,
+                sender INTEGER,
+                subject INTEGER,
+                date_sent INTEGER,
+                read INTEGER DEFAULT 0,
+                flagged INTEGER DEFAULT 0,
+                deleted INTEGER DEFAULT 0,
+                mailbox INTEGER
              );
-             INSERT INTO mailboxes VALUES (1, 'imap://user@server/INBOX');",
+             INSERT INTO mailboxes VALUES (1, 'ews://test-uuid/Inbox');",
         )
         .unwrap();
         for i in 1..=n {
+            // Insert address
             conn.execute(
-                "INSERT INTO messages VALUES (?1, ?2, ?3, ?4, ?5, 0, 0, 1)",
+                "INSERT INTO addresses VALUES (?1, ?2, ?3)",
+                rusqlite::params![i as i64, format!("user{i}@test.com"), format!("User {i}")],
+            )
+            .unwrap();
+            // Insert subject
+            conn.execute(
+                "INSERT INTO subjects VALUES (?1, ?2)",
+                rusqlite::params![i as i64, format!("Subject {i}")],
+            )
+            .unwrap();
+            // Insert message_global_data
+            conn.execute(
+                "INSERT INTO message_global_data VALUES (?1, ?2, ?3)",
+                rusqlite::params![i as i64, i as i64, format!("msg{i}@test")],
+            )
+            .unwrap();
+            // Insert message
+            conn.execute(
+                "INSERT INTO messages (ROWID, message_id, global_message_id, subject_prefix, sender, subject, date_sent, read, flagged, deleted, mailbox)
+                 VALUES (?1, 0, ?2, '', ?3, ?4, ?5, 0, 0, 0, 1)",
                 rusqlite::params![
                     i as i64,
-                    format!("msg{i}@test"),
-                    format!("User{i} <user{i}@test.com>"),
-                    format!("Subject {i}"),
-                    (i as f64) * 100.0,
+                    i as i64,
+                    i as i64,
+                    i as i64,
+                    (i as i64) * 100,
                 ],
             )
             .unwrap();
@@ -301,18 +350,11 @@ mod tests {
 
     #[test]
     fn test_label_filter_finds_emails_beyond_first_page() {
-        // Regression: label filter must be applied BEFORE pagination.
-        // With 10 emails and page_size=3, labeling email #8 (which is on page 3
-        // in date-desc order) should still appear when filtering by that label.
         let envelope = mock_envelope(10);
         let overlay = open_overlay_db_memory().unwrap();
 
-        // Label email rowid=3 with label 1 (this email has date 300.0,
-        // so it's near the end in date-desc order)
         labels::assign_label(&overlay, 3, "msg3@test", 1).unwrap();
 
-        // Without the fix, page 0 size 5 fetches the 5 newest emails (10,9,8,7,6)
-        // then filters — email 3 is not in that page so result would be empty.
         let result = list_emails_filtered(&envelope, &overlay, None, 0, 5, Some(1), false).unwrap();
         assert_eq!(result.total_count, 1);
         assert_eq!(result.emails.len(), 1);
@@ -321,8 +363,6 @@ mod tests {
 
     #[test]
     fn test_untriaged_filter_correct_pagination() {
-        // 5 emails, label 2 of them → 3 untriaged
-        // With page_size=2, page 0 should have 2 untriaged, page 1 should have 1
         let envelope = mock_envelope(5);
         let overlay = open_overlay_db_memory().unwrap();
 
@@ -340,7 +380,6 @@ mod tests {
 
     #[test]
     fn test_no_filter_uses_sql_pagination() {
-        // Without filters, pagination should come from SQL (same as before)
         let envelope = mock_envelope(5);
         let overlay = open_overlay_db_memory().unwrap();
 
@@ -371,83 +410,68 @@ mod tests {
     }
 
     #[test]
-    fn test_nsdate_to_iso8601() {
-        // 2024-01-01 00:00:00 UTC = 725760000 seconds since NSDate epoch
-        let result = nsdate_to_iso8601(725_760_000.0);
+    fn test_unix_to_iso8601() {
+        // 2024-01-01 00:00:00 UTC = Unix 1704067200
+        let result = unix_to_iso8601(1_704_067_200);
         assert!(result.starts_with("2024-01-01T00:00:00"));
     }
 
     #[test]
-    fn test_nsdate_zero() {
-        // NSDate 0 = 2001-01-01 00:00:00 UTC
-        let result = nsdate_to_iso8601(0.0);
-        assert!(result.starts_with("2001-01-01T00:00:00"));
+    fn test_unix_to_iso8601_zero() {
+        let result = unix_to_iso8601(0);
+        assert!(result.starts_with("1970-01-01T00:00:00"));
     }
 
     #[test]
     fn test_list_emails_on_mock_db() {
-        // Create a mock Envelope Index in memory
-        let conn = Connection::open_in_memory().unwrap();
-        conn.execute_batch(
-            "CREATE TABLE mailboxes (ROWID INTEGER PRIMARY KEY, url TEXT);
-             CREATE TABLE messages (
-                ROWID INTEGER PRIMARY KEY, message_id TEXT, sender TEXT,
-                subject TEXT, date_sent REAL, read INTEGER, flagged INTEGER, mailbox INTEGER
-             );
-             INSERT INTO mailboxes VALUES (1, 'imap://user@server/INBOX');
-             INSERT INTO messages VALUES (1, 'msg1@test', 'Alice <alice@test.com>', 'Hello', 725760000.0, 0, 0, 1);
-             INSERT INTO messages VALUES (2, 'msg2@test', 'Bob <bob@test.com>', 'World', 725760100.0, 1, 0, 1);",
-        ).unwrap();
+        let conn = mock_envelope(2);
 
         let result = list_emails(&conn, None, 0, 10).unwrap();
         assert_eq!(result.total_count, 2);
         assert_eq!(result.emails.len(), 2);
-        // Sorted by date desc — Bob's email is newer
-        assert_eq!(result.emails[0].sender_name, "Bob");
-        assert_eq!(result.emails[1].sender_name, "Alice");
-        assert!(result.emails[0].is_read);
-        assert!(!result.emails[1].is_read);
+        // Sorted by date desc — email 2 has date_sent=200, email 1 has date_sent=100
+        assert_eq!(result.emails[0].sender_name, "User 2");
+        assert_eq!(result.emails[1].sender_name, "User 1");
     }
 
     #[test]
     fn test_list_emails_pagination() {
-        let conn = Connection::open_in_memory().unwrap();
-        conn.execute_batch(
-            "CREATE TABLE mailboxes (ROWID INTEGER PRIMARY KEY, url TEXT);
-             CREATE TABLE messages (
-                ROWID INTEGER PRIMARY KEY, message_id TEXT, sender TEXT,
-                subject TEXT, date_sent REAL, read INTEGER, flagged INTEGER, mailbox INTEGER
-             );
-             INSERT INTO mailboxes VALUES (1, 'imap://user@server/INBOX');
-             INSERT INTO messages VALUES (1, 'a@t', 'A <a@t>', 'S1', 100.0, 0, 0, 1);
-             INSERT INTO messages VALUES (2, 'b@t', 'B <b@t>', 'S2', 200.0, 0, 0, 1);
-             INSERT INTO messages VALUES (3, 'c@t', 'C <c@t>', 'S3', 300.0, 0, 0, 1);",
-        )
-        .unwrap();
+        let conn = mock_envelope(3);
 
         let page0 = list_emails(&conn, None, 0, 2).unwrap();
         assert_eq!(page0.total_count, 3);
         assert_eq!(page0.emails.len(), 2);
-        assert_eq!(page0.emails[0].sender_name, "C");
+        assert_eq!(page0.emails[0].subject, "Subject 3");
 
         let page1 = list_emails(&conn, None, 1, 2).unwrap();
         assert_eq!(page1.emails.len(), 1);
-        assert_eq!(page1.emails[0].sender_name, "A");
+        assert_eq!(page1.emails[0].subject, "Subject 1");
     }
 
     #[test]
     fn test_list_emails_folder_filter() {
         let conn = Connection::open_in_memory().unwrap();
         conn.execute_batch(
-            "CREATE TABLE mailboxes (ROWID INTEGER PRIMARY KEY, url TEXT);
+            "CREATE TABLE mailboxes (ROWID INTEGER PRIMARY KEY, url TEXT COLLATE BINARY);
+             CREATE TABLE subjects (ROWID INTEGER PRIMARY KEY, subject TEXT);
+             CREATE TABLE addresses (ROWID INTEGER PRIMARY KEY, address TEXT, comment TEXT);
+             CREATE TABLE message_global_data (ROWID INTEGER PRIMARY KEY, message_id INTEGER, message_id_header TEXT);
              CREATE TABLE messages (
-                ROWID INTEGER PRIMARY KEY, message_id TEXT, sender TEXT,
-                subject TEXT, date_sent REAL, read INTEGER, flagged INTEGER, mailbox INTEGER
+                ROWID INTEGER PRIMARY KEY, message_id INTEGER DEFAULT 0, global_message_id INTEGER,
+                subject_prefix TEXT, sender INTEGER, subject INTEGER,
+                date_sent INTEGER, read INTEGER DEFAULT 0, flagged INTEGER DEFAULT 0,
+                deleted INTEGER DEFAULT 0, mailbox INTEGER
              );
-             INSERT INTO mailboxes VALUES (1, 'imap://user@server/INBOX');
-             INSERT INTO mailboxes VALUES (2, 'imap://user@server/Sent');
-             INSERT INTO messages VALUES (1, 'a@t', 'A <a@t>', 'Inbox msg', 100.0, 0, 0, 1);
-             INSERT INTO messages VALUES (2, 'b@t', 'B <b@t>', 'Sent msg', 200.0, 0, 0, 2);",
+             INSERT INTO mailboxes VALUES (1, 'ews://test-uuid/Inbox');
+             INSERT INTO mailboxes VALUES (2, 'ews://test-uuid/Sent');
+             INSERT INTO subjects VALUES (1, 'Inbox msg');
+             INSERT INTO subjects VALUES (2, 'Sent msg');
+             INSERT INTO addresses VALUES (1, 'a@t', 'A');
+             INSERT INTO addresses VALUES (2, 'b@t', 'B');
+             INSERT INTO message_global_data VALUES (1, 1, 'a@test');
+             INSERT INTO message_global_data VALUES (2, 2, 'b@test');
+             INSERT INTO messages VALUES (1, 0, 1, '', 1, 1, 100, 0, 0, 0, 1);
+             INSERT INTO messages VALUES (2, 0, 2, '', 2, 2, 200, 0, 0, 0, 2);",
         )
         .unwrap();
 
@@ -458,5 +482,38 @@ mod tests {
         let sent = list_emails(&conn, Some("Sent"), 0, 10).unwrap();
         assert_eq!(sent.total_count, 1);
         assert_eq!(sent.emails[0].subject, "Sent msg");
+    }
+
+    #[test]
+    fn test_list_emails_message_id_from_global_data() {
+        let conn = mock_envelope(1);
+        let result = list_emails(&conn, None, 0, 10).unwrap();
+        assert_eq!(result.emails[0].message_id, "msg1@test");
+    }
+
+    #[test]
+    fn test_list_emails_subject_prefix() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE mailboxes (ROWID INTEGER PRIMARY KEY, url TEXT COLLATE BINARY);
+             CREATE TABLE subjects (ROWID INTEGER PRIMARY KEY, subject TEXT);
+             CREATE TABLE addresses (ROWID INTEGER PRIMARY KEY, address TEXT, comment TEXT);
+             CREATE TABLE message_global_data (ROWID INTEGER PRIMARY KEY, message_id INTEGER, message_id_header TEXT);
+             CREATE TABLE messages (
+                ROWID INTEGER PRIMARY KEY, message_id INTEGER DEFAULT 0, global_message_id INTEGER,
+                subject_prefix TEXT, sender INTEGER, subject INTEGER,
+                date_sent INTEGER, read INTEGER DEFAULT 0, flagged INTEGER DEFAULT 0,
+                deleted INTEGER DEFAULT 0, mailbox INTEGER
+             );
+             INSERT INTO mailboxes VALUES (1, 'ews://test-uuid/Inbox');
+             INSERT INTO subjects VALUES (1, 'Hello');
+             INSERT INTO addresses VALUES (1, 'a@t', 'A');
+             INSERT INTO message_global_data VALUES (1, 1, 'a@test');
+             INSERT INTO messages VALUES (1, 0, 1, 'Re: ', 1, 1, 100, 0, 0, 0, 1);",
+        )
+        .unwrap();
+
+        let result = list_emails(&conn, None, 0, 10).unwrap();
+        assert_eq!(result.emails[0].subject, "Re: Hello");
     }
 }

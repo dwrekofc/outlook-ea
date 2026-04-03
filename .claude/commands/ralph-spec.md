@@ -12,7 +12,7 @@ Ralph's planning loop (`PROMPT_plan.md`) reads every file in `specs/*` and compa
 
 ### PHASE 1: Read Requirements & Resolve Questions
 
-1. Find the OLDEST active requirements file in `.planning/`. List all `reqs-*.md` files in `.planning/` (NOT `.planning/archive/`), sort them, and read the one with the smallest increment number (e.g., `reqs-001.md` before `reqs-002.md`). Also read the matching `decisions-*.md` if it exists (same increment number). **Do NOT read from `.planning/archive/`.** Do NOT read `docs/` or any other location — the active reqs file is the single source of truth.
+1. Find the OLDEST active requirements file in `.planning/`. List all `reqs-*.md` files in `.planning/` (NOT `.planning/archive/`), sort them, and read the one with the smallest increment number (e.g., `reqs-001.md` before `reqs-002.md`). Also read the matching `decisions-*.md` if it exists (same increment number). **Do NOT read from `.planning/archive/`.** Do NOT read `.planning/roadmap-*.md` — roadmap files are deferred ideas, not actionable requirements. Do NOT read `docs/` or any other location — the active reqs file is the single source of truth.
 
 2. Identify **outstanding questions, ambiguities, or gaps** in the requirements. These might be:
    - Requirements that are vague or underspecified
@@ -51,7 +51,7 @@ Rules for the draft outline:
 - Each topic MUST include a `Source:` line mapping it to the JTBD(s) it traces to
 - "Key reqs" are 3-5 truncated bullet points (just enough to confirm scope, not full requirements)
 - Order topics by dependency (foundational topics first)
-- If the reqs have locked decisions, constraints, or design principles that apply to ALL topics, note them once under a header called `CROSS-CUTTING CONSTRAINTS` at the top
+- If the reqs have locked decisions, constraints, or design principles that apply to ALL topics, note them under a header called `CROSS-CUTTING CONSTRAINTS` at the top of the outline. In Phase 3, these constraints must be duplicated into the Constraints section of EVERY spec they apply to — each spec must be fully self-contained.
 
 7. **Validate coverage before presenting.** Before showing the outline to the user, verify: (a) every JTBD in the reqs has at least one corresponding topic, (b) no single topic covers more than one JTBD unless it is genuinely atomic. If a JTBD has no topic, add one. If a topic maps to multiple JTBDs, evaluate whether it should be split.
 
@@ -71,15 +71,33 @@ For each approved topic, write `specs/<topic-name>.md` using this structure:
 ## Source
 JTBD N: [title] | JTBD M: [title]
 
-## Purpose
-One paragraph: what this part of the system does and why it exists.
+## Topic Statement
+The system [does what] [for whom/what purpose]. One sentence.
 
-## Requirements
-Bulleted list of concrete, testable requirements. Each bullet is one thing the code must do.
-- Use imperative voice ("Support X", "Provide Y", "Reject Z")
-- Be specific enough that an agent can search the codebase and confirm present/absent
-- Include data shapes, APIs, and behaviors — not implementation details
-- If a requirement references another topic, name it explicitly (e.g., "Use tokens from theme-engine")
+## Scope
+**In-scope:** [comma-separated concerns this spec covers]
+**Boundaries:** [what is explicitly out of scope and which topic owns it]
+
+## Data Contracts
+Concrete data shapes that other topics depend on or that define an API contract.
+- Entity name: { field: type, field: type, ... }
+- Response shape: { field: type, ... }
+Use descriptive types (string, int, ISO-8601 timestamp), not language-specific types.
+
+## Behaviors (execution order)
+Numbered list describing what the system does, in the order it happens.
+1. On [trigger]: [what happens]
+2. On [trigger]: [what happens]
+
+## State Transitions
+Lifecycle of the primary entity in this topic.
+- State A → State B (trigger)
+- State B → State C (trigger)
+- [notable] Any non-obvious transition behavior
+
+## Cross-Topic Shared Behavior
+Shared concerns that apply to this topic from other specs.
+- [Shared concern] applies to [which operations] (see [other-topic] spec)
 
 ## Constraints
 Bulleted list of rules, boundaries, and locked decisions that govern HOW this topic is implemented.
@@ -96,17 +114,24 @@ Numbered list of concrete checks. Each one is a statement that is either true or
 3. Integration points with other topics work
 
 ## References
-Optional. Pointers to reference implementations, external codebases, or planning doc sections that informed this spec.
+Optional. Pointers to reference implementations, external codebases, related specs, or planning doc sections that informed this spec.
+- Related: [other-spec] ([boundary description])
+- Reference: [URL or file path]
 ```
 
 Rules for writing specs:
-- **Include a `## Source` section** at the top of each spec (after the title, before Purpose) listing which JTBD(s) and user stories this spec traces to. This enables traceability back to requirements.
+- **Include a `## Source` section** at the top of each spec (after the title, before Topic Statement) listing which JTBD(s) and user stories this spec traces to. This enables traceability back to requirements.
 - **Extract, don't invent.** Every requirement should trace back to something in the reqs. If you infer something not explicitly stated, mark it with `[inferred]`.
-- **Requirements describe WHAT, not HOW.** "Support light and dark themes" not "Create a HashMap<String, Theme>."
+- **Topic Statement** must pass the "one sentence without 'and'" test. If you need "and," it's two topics.
+- **Scope** must name the owning topic when declaring a boundary — don't just say "out of scope."
+- **Data Contracts** — include only when data shapes cross topic boundaries or define an API contract. Use generic types (string, int, bool), not language-specific types. Omit this section if all data shapes are internal to the topic.
+- **Behaviors** describe WHAT happens in order, not HOW it's implemented. No code, no variable names.
+- **State Transitions** — include only when the topic has a primary entity with a meaningful lifecycle. Omit for topics without stateful entities.
+- **Cross-Topic Shared Behavior** — reference the owning spec by name. Cross-cutting constraints that apply to multiple specs must also be duplicated into the Constraints section of EVERY spec they apply to.
 - **One spec per topic.** Don't split a topic across files or combine topics into one file.
-- **Specs don't describe ordering or phases.** That's the implementation plan's job. Specs describe the end state.
-- **Cross-cutting constraints** that apply to ALL specs should get their own spec file (e.g., `specs/design-principles.md`) rather than being repeated in every file.
+- **Each spec must be fully self-contained** — readable in isolation without referencing other spec files. Duplication is intentional.
 - **Keep specs scannable.** Ralph reads them every loop iteration. Dense prose wastes context. Bullets > paragraphs.
+- **Provenance tags** may be used in any section: `[inferred]`, `[observed from code]`, `[needs-clarification]`.
 
 After writing all spec files, print a summary:
 

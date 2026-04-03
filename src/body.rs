@@ -110,7 +110,7 @@ pub fn parse_email_body(raw: &[u8]) -> BodyResult<(String, String)> {
     if let Some(html) = find_part(&parsed, "text/html") {
         let text = html2text::from_read(html.as_bytes(), 80)
             .map_err(|e| BodyError::Parse(e.to_string()))?;
-        return Ok((text, "markdown".to_string()));
+        return Ok((clean_html_text(&text), "markdown".to_string()));
     }
 
     // Single-part email
@@ -122,10 +122,105 @@ pub fn parse_email_body(raw: &[u8]) -> BodyResult<(String, String)> {
     if content_type.contains("html") {
         let text = html2text::from_read(body.as_bytes(), 80)
             .map_err(|e| BodyError::Parse(e.to_string()))?;
-        Ok((text, "markdown".to_string()))
+        Ok((clean_html_text(&text), "markdown".to_string()))
     } else {
         Ok((body, "plain".to_string()))
     }
+}
+
+/// Clean up noisy html2text output: collapse box-drawing separator lines,
+/// remove tracking pixel artifacts, and reduce excessive blank lines.
+pub fn clean_html_text(text: &str) -> String {
+    let lines: Vec<&str> = text.lines().collect();
+    let mut cleaned: Vec<String> = Vec::with_capacity(lines.len());
+
+    for line in &lines {
+        let trimmed = line.trim();
+
+        // Remove lines that are only [Image] or [image] (tracking pixels / spacer gifs)
+        if trimmed.eq_ignore_ascii_case("[image]") {
+            continue;
+        }
+
+        // Skip separator-only lines entirely — they come from HTML table layout
+        if is_box_drawing_line(line) {
+            continue;
+        }
+
+        // Trim trailing whitespace
+        cleaned.push(line.trim_end().to_string());
+    }
+
+    // Collapse 3+ consecutive blank lines into 1
+    let mut final_lines: Vec<String> = Vec::with_capacity(cleaned.len());
+    let mut consecutive_blanks = 0u32;
+
+    for line in &cleaned {
+        if line.trim().is_empty() {
+            consecutive_blanks += 1;
+            if consecutive_blanks <= 1 {
+                final_lines.push(line.clone());
+            }
+        } else {
+            consecutive_blanks = 0;
+            final_lines.push(line.clone());
+        }
+    }
+
+    // Trim leading/trailing blank lines
+    while final_lines.first().is_some_and(|l| l.trim().is_empty()) {
+        final_lines.remove(0);
+    }
+    while final_lines.last().is_some_and(|l| l.trim().is_empty()) {
+        final_lines.pop();
+    }
+
+    final_lines.join("\n")
+}
+
+/// Returns true if the line consists only of box-drawing characters and whitespace.
+fn is_box_drawing_line(line: &str) -> bool {
+    let trimmed = line.trim();
+    if trimmed.is_empty() {
+        return false;
+    }
+    trimmed.chars().all(|c| {
+        matches!(
+            c,
+            '─' | '│'
+                | '┬'
+                | '┴'
+                | '┼'
+                | '═'
+                | '║'
+                | '╔'
+                | '╗'
+                | '╚'
+                | '╝'
+                | '╠'
+                | '╣'
+                | '╦'
+                | '╩'
+                | '╬'
+                | '┌'
+                | '┐'
+                | '└'
+                | '┘'
+                | '├'
+                | '┤'
+                | '━'
+                | '┃'
+                | '╭'
+                | '╮'
+                | '╯'
+                | '╰'
+                | '▔'
+                | '▁'
+                | '▏'
+                | '▕'
+                | ' '
+        )
+    })
 }
 
 /// Recursively search MIME parts for a specific content type.
@@ -145,32 +240,128 @@ fn find_part(mail: &mailparse::ParsedMail, target_type: &str) -> Option<String> 
     None
 }
 
+/// Collect Inbox.mbox search roots for all accounts under ~/Library/Mail/V*.
+/// Returns paths like `~/Library/Mail/V10/<UUID>/Inbox.mbox/` for each account.
+fn inbox_search_roots(mail_dir: &Path) -> Vec<PathBuf> {
+    let mut roots = Vec::new();
+    for v_entry in std::fs::read_dir(mail_dir).into_iter().flatten().flatten() {
+        let v_path = v_entry.path();
+        if !v_path.is_dir() {
+            continue;
+        }
+        let v_name = match v_path.file_name().and_then(|n| n.to_str()) {
+            Some(n) if n.starts_with('V') => n.to_string(),
+            _ => continue,
+        };
+        let _ = v_name; // used only for the filter above
+        // Each subdirectory of V* is an account UUID
+        for acct_entry in std::fs::read_dir(&v_path).into_iter().flatten().flatten() {
+            let acct_path = acct_entry.path();
+            if acct_path.is_dir() {
+                let inbox = acct_path.join("Inbox.mbox");
+                if inbox.is_dir() {
+                    roots.push(inbox);
+                }
+            }
+        }
+    }
+    roots
+}
+
 /// Find the on-disk .emlx file for a given email.
-/// Apple Mail stores messages as .emlx files under ~/Library/Mail/V*/
-pub fn find_email_file(rowid: i64) -> BodyResult<PathBuf> {
+/// Uses Spotlight (mdfind) for fast lookup, falling back to targeted directory search.
+/// Apple Mail stores messages as `<rowid>.emlx` or `<rowid>.partial.emlx`.
+///
+/// When `inbox_only` is true, restricts the search to Inbox.mbox directories
+/// (one per account), which is much faster and avoids hitting archive/trash.
+pub fn find_email_file(rowid: i64, inbox_only: bool) -> BodyResult<PathBuf> {
     let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
     let mail_dir = PathBuf::from(&home).join("Library/Mail");
 
-    // Search for the .emlx file matching the rowid
-    // Apple Mail names files as <rowid>.emlx or <rowid>.partial.emlx
-    let filename = format!("{rowid}.emlx");
+    let search_dirs: Vec<PathBuf> = if inbox_only {
+        let roots = inbox_search_roots(&mail_dir);
+        if roots.is_empty() {
+            // No Inbox.mbox found — fall back to full mail_dir
+            vec![mail_dir.clone()]
+        } else {
+            roots
+        }
+    } else {
+        vec![mail_dir.clone()]
+    };
 
-    fn search_dir(dir: &Path, filename: &str) -> Option<PathBuf> {
-        let entries = std::fs::read_dir(dir).ok()?;
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.is_dir() {
-                if let Some(found) = search_dir(&path, filename) {
-                    return Some(found);
+    // Try Spotlight first — instant lookup
+    for search_dir in &search_dirs {
+        if let Ok(output) = std::process::Command::new("mdfind")
+            .args([
+                "-onlyin",
+                search_dir.to_str().unwrap_or("."),
+                &format!(
+                    "kMDItemFSName == '{rowid}.emlx' || kMDItemFSName == '{rowid}.partial.emlx'"
+                ),
+            ])
+            .output()
+            && output.status.success()
+        {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            if let Some(path) = stdout.lines().next() {
+                let p = PathBuf::from(path);
+                if p.exists() {
+                    return Ok(p);
                 }
-            } else if path.file_name().and_then(|f| f.to_str()) == Some(filename) {
-                return Some(path);
             }
         }
-        None
     }
 
-    search_dir(&mail_dir, &filename).ok_or(BodyError::EmailFileNotFound(rowid))
+    // Fallback: search Messages directories directly
+    let filenames = [format!("{rowid}.emlx"), format!("{rowid}.partial.emlx")];
+    if inbox_only {
+        // Search only within the Inbox.mbox directories
+        for search_dir in &search_dirs {
+            if let Some(found) = search_messages_dirs(search_dir, &filenames) {
+                return Ok(found);
+            }
+        }
+    } else {
+        // Search all V* directories
+        for entry in std::fs::read_dir(&mail_dir).into_iter().flatten().flatten() {
+            let path = entry.path();
+            if path.is_dir()
+                && let Some(name) = path.file_name().and_then(|n| n.to_str())
+                && name.starts_with('V')
+                && let Some(found) = search_messages_dirs(&path, &filenames)
+            {
+                return Ok(found);
+            }
+        }
+    }
+
+    Err(BodyError::EmailFileNotFound(rowid))
+}
+
+/// Search only "Messages" subdirectories within a mail tree for the target file.
+/// Much faster than a full recursive walk since it skips Attachments, etc.
+fn search_messages_dirs(dir: &Path, filenames: &[String]) -> Option<PathBuf> {
+    for entry in std::fs::read_dir(dir).ok()?.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            let dirname = path.file_name()?.to_str()?;
+            if dirname == "Messages" {
+                // Check for target files in this Messages directory
+                for filename in filenames {
+                    let candidate = path.join(filename);
+                    if candidate.exists() {
+                        return Some(candidate);
+                    }
+                }
+            } else if dirname != "Attachments"
+                && let Some(found) = search_messages_dirs(&path, filenames)
+            {
+                return Some(found);
+            }
+        }
+    }
+    None
 }
 
 /// Parse an .emlx file. Apple .emlx format has a byte count on the first line,
@@ -194,23 +385,31 @@ pub fn parse_emlx(raw: &[u8]) -> BodyResult<Vec<u8>> {
 }
 
 /// Read and parse an email body, using cache if available.
+/// When `inbox_only` is true, file search is restricted to Inbox.mbox directories.
 pub fn read_email_body(
     overlay_conn: &Connection,
     envelope_conn: &Connection,
     rowid: i64,
+    inbox_only: bool,
 ) -> BodyResult<EmailDetail> {
-    // Get metadata from envelope index (to/cc not available here — comes from .emlx parsing)
-    let (message_id, from, subject, date_sent): (String, String, String, f64) = envelope_conn
+    // Get metadata from envelope index using V10 normalized schema
+    let (message_id, from, subject, date_sent): (String, String, String, i64) = envelope_conn
         .query_row(
-            "SELECT COALESCE(message_id, ''), COALESCE(sender, ''),
-                    COALESCE(subject, ''), COALESCE(date_sent, 0)
-             FROM messages WHERE ROWID = ?1",
+            "SELECT COALESCE(mgd.message_id_header, ''),
+                    COALESCE(a.comment, '') || ' <' || COALESCE(a.address, '') || '>',
+                    COALESCE(m.subject_prefix, '') || COALESCE(sub.subject, ''),
+                    COALESCE(m.date_sent, 0)
+             FROM messages m
+             JOIN subjects sub ON m.subject = sub.ROWID
+             JOIN addresses a ON m.sender = a.ROWID
+             LEFT JOIN message_global_data mgd ON mgd.ROWID = m.global_message_id
+             WHERE m.ROWID = ?1",
             [rowid],
             |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
         )
         .map_err(BodyError::Sqlite)?;
 
-    let date = crate::data::nsdate_to_iso8601(date_sent);
+    let date = crate::data::unix_to_iso8601(date_sent);
 
     // Check cache first
     if let Some(cached) = get_cached_body(overlay_conn, rowid)? {
@@ -228,7 +427,7 @@ pub fn read_email_body(
     }
 
     // Find and parse the .emlx file
-    let emlx_path = find_email_file(rowid)?;
+    let emlx_path = find_email_file(rowid, inbox_only)?;
     let raw = std::fs::read(&emlx_path)?;
     let message = parse_emlx(&raw)?;
     let (body_text, body_format) = parse_email_body(&message)?;
@@ -348,6 +547,38 @@ mod tests {
         // Verify it returns from cache
         let cached = get_cached_body(&conn, 42).unwrap().unwrap();
         assert_eq!(cached.body_text, "Cached content");
+    }
+
+    #[test]
+    fn test_clean_html_text_removes_separators() {
+        let input = "Hello\n────\n────\n────\n────\nWorld";
+        let result = clean_html_text(input);
+        assert_eq!(result, "Hello\nWorld");
+    }
+
+    #[test]
+    fn test_clean_html_text_removes_image_tracking() {
+        let input = "Hello\n[Image]\nWorld\n[image]\nEnd\n[Image: logo]\nKeep";
+        let result = clean_html_text(input);
+        assert!(result.contains("Hello"));
+        assert!(result.contains("World"));
+        assert!(!result.contains("[Image]\n"));
+        assert!(!result.contains("[image]\n"));
+        assert!(result.contains("[Image: logo]"));
+    }
+
+    #[test]
+    fn test_clean_html_text_collapses_blank_lines() {
+        let input = "A\n\n\n\n\nB";
+        let result = clean_html_text(input);
+        assert_eq!(result, "A\n\nB");
+    }
+
+    #[test]
+    fn test_clean_html_text_trims_trailing_whitespace() {
+        let input = "Hello   \nWorld  ";
+        let result = clean_html_text(input);
+        assert_eq!(result, "Hello\nWorld");
     }
 
     #[test]

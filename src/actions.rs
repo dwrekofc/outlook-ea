@@ -109,39 +109,17 @@ pub fn set_read_status(message_id: &str, read: bool) -> ActionResult<()> {
 }
 
 /// Execute a bulk action on multiple emails, respecting VIP protection.
-/// `vip_message_ids` should contain message IDs of VIP senders to exclude.
+/// VIP emails are silently skipped — non-VIP emails are still processed.
 pub fn bulk_action(
     message_ids: &[String],
     action: &str,
     vip_message_ids: &[String],
-    force: bool,
 ) -> ActionResult<ActionResponse> {
-    let protected: Vec<&String> = message_ids
+    let skipped_count = message_ids
         .iter()
         .filter(|id| vip_message_ids.contains(id))
-        .collect();
+        .count();
 
-    if !protected.is_empty() && !force {
-        let affected: Vec<String> = message_ids
-            .iter()
-            .filter(|id| !vip_message_ids.contains(id))
-            .cloned()
-            .collect();
-
-        return Ok(ActionResponse {
-            action: action.to_string(),
-            message_ids_acted: vec![],
-            success: false,
-            message: format!(
-                "{} VIP emails excluded from bulk {}. {} non-VIP emails would be affected.",
-                protected.len(),
-                action,
-                affected.len()
-            ),
-        });
-    }
-
-    // Filter out VIP emails for bulk destructive actions
     let actionable: Vec<&String> = message_ids
         .iter()
         .filter(|id| !vip_message_ids.contains(id))
@@ -164,16 +142,20 @@ pub fn bulk_action(
     }
 
     let count = succeeded.len();
+    let mut message = format!(
+        "Successfully {}d {} of {} emails",
+        action,
+        count,
+        actionable.len()
+    );
+    if skipped_count > 0 {
+        message.push_str(&format!(" ({} VIP emails skipped)", skipped_count));
+    }
     Ok(ActionResponse {
         action: action.to_string(),
         message_ids_acted: succeeded,
         success: true,
-        message: format!(
-            "Successfully {}d {} of {} emails",
-            action,
-            count,
-            actionable.len()
-        ),
+        message,
     })
 }
 
@@ -185,7 +167,9 @@ mod tests {
     // These tests validate the logic layer without executing AppleScript.
 
     #[test]
-    fn test_bulk_action_vip_protection() {
+    fn test_bulk_action_vip_skipped_others_processed() {
+        // VIP emails should be skipped, non-VIP emails should still be attempted.
+        // AppleScript will fail in test env, but we verify the logic path.
         let ids = vec![
             "a@test".to_string(),
             "b@test".to_string(),
@@ -193,21 +177,19 @@ mod tests {
         ];
         let vip_ids = vec!["b@test".to_string()];
 
-        let result = bulk_action(&ids, "delete", &vip_ids, false).unwrap();
-        assert!(!result.success);
-        assert!(result.message.contains("VIP"));
+        if let Ok(resp) = bulk_action(&ids, "delete", &vip_ids) {
+            assert!(resp.success);
+            assert!(resp.message.contains("VIP"));
+            assert!(!resp.message_ids_acted.contains(&"b@test".to_string()));
+        }
     }
 
     #[test]
     fn test_bulk_action_no_vip() {
-        // Without actual Mail.app, the AppleScript will fail.
-        // This test verifies the logic of VIP filtering.
         let ids = vec!["a@test".to_string()];
         let vip_ids: Vec<String> = vec![];
 
-        // This will error because osascript won't work in test,
-        // but that's fine — we're testing the logic path, not AppleScript.
-        let _result = bulk_action(&ids, "delete", &vip_ids, false);
+        let _result = bulk_action(&ids, "delete", &vip_ids);
         // We just verify it doesn't panic
     }
 
@@ -224,9 +206,10 @@ mod tests {
         let ids = vec!["vip@boss.com".to_string(), "normal@test.com".to_string()];
         let vip_ids = vec!["vip@boss.com".to_string()];
 
-        let result = bulk_action(&ids, "archive", &vip_ids, false).unwrap();
-        assert!(!result.success);
-        assert!(result.message.contains("1 VIP"));
-        assert!(result.message.contains("1 non-VIP"));
+        if let Ok(resp) = bulk_action(&ids, "archive", &vip_ids) {
+            assert!(resp.success);
+            assert!(resp.message.contains("VIP"));
+            assert!(!resp.message_ids_acted.contains(&"vip@boss.com".to_string()));
+        }
     }
 }

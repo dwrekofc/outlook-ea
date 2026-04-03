@@ -82,6 +82,40 @@ fn migrate(conn: &Connection) -> DbResult<()> {
         )?;
     }
 
+    if version < 3 {
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS nodes (
+                id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                node_type   TEXT NOT NULL,
+                name        TEXT NOT NULL,
+                email       TEXT,
+                description TEXT,
+                metadata    TEXT DEFAULT '{}',
+                is_vip      INTEGER DEFAULT 0,
+                created_at  TEXT NOT NULL,
+                updated_at  TEXT NOT NULL
+            );
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_nodes_email ON nodes(email) WHERE email IS NOT NULL;
+            CREATE INDEX IF NOT EXISTS idx_nodes_type ON nodes(node_type);
+
+            CREATE TABLE IF NOT EXISTS edges (
+                id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                source_id   INTEGER NOT NULL REFERENCES nodes(id) ON DELETE CASCADE,
+                target_id   INTEGER NOT NULL REFERENCES nodes(id) ON DELETE CASCADE,
+                predicate   TEXT NOT NULL,
+                context     TEXT,
+                weight      REAL DEFAULT 1.0,
+                created_at  TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_edges_source ON edges(source_id);
+            CREATE INDEX IF NOT EXISTS idx_edges_target ON edges(target_id);
+            CREATE INDEX IF NOT EXISTS idx_edges_predicate ON edges(predicate);
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_edges_unique ON edges(source_id, target_id, predicate);
+
+            INSERT INTO schema_version (version) VALUES (3);",
+        )?;
+    }
+
     Ok(())
 }
 
@@ -112,7 +146,7 @@ mod tests {
         let version: i32 = conn
             .query_row("SELECT MAX(version) FROM schema_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(version, 2);
+        assert_eq!(version, 3);
     }
 
     #[test]
@@ -123,7 +157,7 @@ mod tests {
         let version: i32 = conn
             .query_row("SELECT MAX(version) FROM schema_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(version, 2);
+        assert_eq!(version, 3);
     }
 
     #[test]
@@ -177,7 +211,20 @@ mod tests {
             "SELECT * FROM email_identity LIMIT 0;
              SELECT * FROM labels LIMIT 0;
              SELECT * FROM cached_bodies LIMIT 0;
-             SELECT * FROM schema_version LIMIT 0;",
+             SELECT * FROM schema_version LIMIT 0;
+             SELECT * FROM nodes LIMIT 0;
+             SELECT * FROM edges LIMIT 0;",
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn test_migration_v3_creates_nodes_edges() {
+        let conn = open_overlay_db_memory().unwrap();
+        // Verify the nodes and edges tables exist by querying them
+        conn.execute_batch(
+            "SELECT * FROM nodes LIMIT 0;
+             SELECT * FROM edges LIMIT 0;",
         )
         .unwrap();
     }

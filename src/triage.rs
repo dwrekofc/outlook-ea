@@ -103,6 +103,13 @@ pub fn auto_triage(
                         }
                         ActionType::Archive => {
                             if !rules::is_vip(config, &email.sender_address) {
+                                // Mark as read before archiving (e.g. SAP Appreciate)
+                                if let Err(e) = actions::set_read_status(&email.message_id, true) {
+                                    summary.warnings.push(format!(
+                                        "Could not mark email {} as read: {e}",
+                                        email.id
+                                    ));
+                                }
                                 if let Err(e) = actions::archive_email(&email.message_id) {
                                     summary
                                         .warnings
@@ -187,6 +194,7 @@ mod tests {
             is_read: false,
             folder: "INBOX".to_string(),
             label: None,
+            sender_context: None,
         }
     }
 
