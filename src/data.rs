@@ -89,8 +89,8 @@ fn inbox_where(folder: Option<&str>) -> (String, Vec<Box<dyn rusqlite::types::To
             vec![Box::new(format!("%{f}%"))],
         )
     } else {
-        // Default: Inbox (case-insensitive via LIKE on folder name portion)
-        ("WHERE mb.url LIKE '%nbox%'".to_string(), vec![])
+        // Default: top-level Inbox only (not subfolders like Inbox/Kudos)
+        ("WHERE mb.url LIKE '%/Inbox'".to_string(), vec![])
     }
 }
 
