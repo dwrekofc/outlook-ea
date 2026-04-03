@@ -28,6 +28,8 @@ pub struct TriageSummary {
     pub archived: Vec<TriageAction>,
     pub untriaged: usize,
     pub total_processed: usize,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -54,6 +56,7 @@ pub fn auto_triage(
         archived: vec![],
         untriaged: 0,
         total_processed: untriaged_emails.len(),
+        warnings: vec![],
     };
 
     for email in untriaged_emails {
@@ -91,8 +94,9 @@ pub fn auto_triage(
                             // VIP emails are never trashed
                             if !rules::is_vip(config, &email.sender_address) {
                                 if let Err(e) = actions::delete_email(&email.message_id) {
-                                    // Log but don't fail — AppleScript may not be available
-                                    eprintln!("Warning: could not trash email: {e}");
+                                    summary
+                                        .warnings
+                                        .push(format!("Could not trash email {}: {e}", email.id));
                                 }
                                 summary.trashed.push(triage_action);
                             }
@@ -100,7 +104,9 @@ pub fn auto_triage(
                         ActionType::Archive => {
                             if !rules::is_vip(config, &email.sender_address) {
                                 if let Err(e) = actions::archive_email(&email.message_id) {
-                                    eprintln!("Warning: could not archive email: {e}");
+                                    summary
+                                        .warnings
+                                        .push(format!("Could not archive email {}: {e}", email.id));
                                 }
                                 summary.archived.push(triage_action);
                             }
@@ -274,6 +280,17 @@ mod tests {
         // Second run should not re-label (already labeled)
         assert_eq!(summary2.labeled.len(), 0);
         assert_eq!(summary2.total_processed, 1);
+    }
+
+    #[test]
+    fn test_triage_summary_warnings_field() {
+        let conn = open_overlay_db_memory().unwrap();
+        let config = sample_config();
+        let emails = vec![make_email(20, "store@shop.com", "Your receipt")];
+
+        let summary = auto_triage(&conn, &config, &emails, false).unwrap();
+        // Warnings vec should exist but be empty when no AppleScript issues
+        assert!(summary.warnings.is_empty());
     }
 
     #[test]

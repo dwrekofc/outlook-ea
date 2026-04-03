@@ -6,6 +6,13 @@ fn main() {
     let cli_args = Cli::parse();
     let output = run(cli_args);
     println!("{output}");
+
+    // Exit with non-zero code if the response indicates an error
+    if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&output)
+        && parsed.get("status").and_then(|s| s.as_str()) == Some("error")
+    {
+        std::process::exit(1);
+    }
 }
 
 fn run(cli_args: Cli) -> String {
@@ -39,6 +46,22 @@ fn open_overlay() -> Result<rusqlite::Connection, String> {
     let path = db::default_overlay_path();
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+        // Bootstrap PATTERNS.md if it doesn't exist
+        let patterns_path = parent.join("PATTERNS.md");
+        if !patterns_path.exists() {
+            let _ = std::fs::write(
+                &patterns_path,
+                "# Learned Triage Preferences\n\n\
+                 This file records patterns observed during triage sessions.\n\
+                 The skill wrapper updates it as the user makes consistent decisions.\n\n\
+                 ## Sender Patterns\n\n\
+                 <!-- e.g., \"always trash emails from noreply@marketing.com\" -->\n\n\
+                 ## Subject Patterns\n\n\
+                 <!-- e.g., \"label newsletters as Read Later\" -->\n\n\
+                 ## Notes\n\n\
+                 <!-- General triage preferences -->\n",
+            );
+        }
     }
     db::open_overlay_db(&path).map_err(|e| e.to_string())
 }

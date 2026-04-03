@@ -19,7 +19,7 @@ pub type ActionResult<T> = Result<T, ActionError>;
 #[derive(Debug, Clone, Serialize)]
 pub struct ActionResponse {
     pub action: String,
-    pub email_ids: Vec<i64>,
+    pub message_ids_acted: Vec<String>,
     pub success: bool,
     pub message: String,
 }
@@ -40,11 +40,18 @@ fn run_applescript(script: &str) -> ActionResult<String> {
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
+/// Escape a string for safe interpolation into AppleScript double-quoted strings.
+/// Replaces backslashes and double quotes with their escaped equivalents.
+fn escape_applescript(s: &str) -> String {
+    s.replace('\\', "\\\\").replace('"', "\\\"")
+}
+
 /// Delete (move to trash) a single email by message ID.
 pub fn delete_email(message_id: &str) -> ActionResult<()> {
+    let safe_id = escape_applescript(message_id);
     let script = format!(
         r#"tell application "Mail"
-            set msgs to (every message of inbox whose message id is "{message_id}")
+            set msgs to (every message of inbox whose message id is "{safe_id}")
             repeat with msg in msgs
                 delete msg
             end repeat
@@ -56,9 +63,10 @@ pub fn delete_email(message_id: &str) -> ActionResult<()> {
 
 /// Archive a single email (move out of inbox).
 pub fn archive_email(message_id: &str) -> ActionResult<()> {
+    let safe_id = escape_applescript(message_id);
     let script = format!(
         r#"tell application "Mail"
-            set msgs to (every message of inbox whose message id is "{message_id}")
+            set msgs to (every message of inbox whose message id is "{safe_id}")
             repeat with msg in msgs
                 set mailbox of msg to mailbox "Archive" of account of mailbox of msg
             end repeat
@@ -70,10 +78,11 @@ pub fn archive_email(message_id: &str) -> ActionResult<()> {
 
 /// Flag or unflag an email.
 pub fn set_flag(message_id: &str, flagged: bool) -> ActionResult<()> {
+    let safe_id = escape_applescript(message_id);
     let flag_val = if flagged { "true" } else { "false" };
     let script = format!(
         r#"tell application "Mail"
-            set msgs to (every message of inbox whose message id is "{message_id}")
+            set msgs to (every message of inbox whose message id is "{safe_id}")
             repeat with msg in msgs
                 set flagged status of msg to {flag_val}
             end repeat
@@ -85,10 +94,11 @@ pub fn set_flag(message_id: &str, flagged: bool) -> ActionResult<()> {
 
 /// Mark an email as read or unread.
 pub fn set_read_status(message_id: &str, read: bool) -> ActionResult<()> {
+    let safe_id = escape_applescript(message_id);
     let read_val = if read { "true" } else { "false" };
     let script = format!(
         r#"tell application "Mail"
-            set msgs to (every message of inbox whose message id is "{message_id}")
+            set msgs to (every message of inbox whose message id is "{safe_id}")
             repeat with msg in msgs
                 set read status of msg to {read_val}
             end repeat
@@ -120,7 +130,7 @@ pub fn bulk_action(
 
         return Ok(ActionResponse {
             action: action.to_string(),
-            email_ids: vec![],
+            message_ids_acted: vec![],
             success: false,
             message: format!(
                 "{} VIP emails excluded from bulk {}. {} non-VIP emails would be affected.",
@@ -137,7 +147,7 @@ pub fn bulk_action(
         .filter(|id| !vip_message_ids.contains(id))
         .collect();
 
-    let mut succeeded = vec![];
+    let mut succeeded: Vec<String> = vec![];
     for msg_id in &actionable {
         let result = match action {
             "delete" => delete_email(msg_id),
@@ -149,18 +159,19 @@ pub fn bulk_action(
             _ => continue,
         };
         if result.is_ok() {
-            succeeded.push(msg_id);
+            succeeded.push((*msg_id).clone());
         }
     }
 
+    let count = succeeded.len();
     Ok(ActionResponse {
         action: action.to_string(),
-        email_ids: vec![], // IDs aren't rowids here, this is for the response
+        message_ids_acted: succeeded,
         success: true,
         message: format!(
             "Successfully {}d {} of {} emails",
             action,
-            succeeded.len(),
+            count,
             actionable.len()
         ),
     })
@@ -198,6 +209,14 @@ mod tests {
         // but that's fine — we're testing the logic path, not AppleScript.
         let _result = bulk_action(&ids, "delete", &vip_ids, false);
         // We just verify it doesn't panic
+    }
+
+    #[test]
+    fn test_escape_applescript() {
+        assert_eq!(escape_applescript("simple"), "simple");
+        assert_eq!(escape_applescript(r#"has"quote"#), r#"has\"quote"#);
+        assert_eq!(escape_applescript(r"has\backslash"), r"has\\backslash");
+        assert_eq!(escape_applescript(r#"both\"mixed"#), r#"both\\\"mixed"#);
     }
 
     #[test]

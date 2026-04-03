@@ -74,6 +74,14 @@ fn migrate(conn: &Connection) -> DbResult<()> {
         )?;
     }
 
+    if version < 2 {
+        conn.execute_batch(
+            "ALTER TABLE cached_bodies ADD COLUMN cached_to TEXT NOT NULL DEFAULT '';
+             ALTER TABLE cached_bodies ADD COLUMN cached_cc TEXT NOT NULL DEFAULT '';
+             INSERT INTO schema_version (version) VALUES (2);",
+        )?;
+    }
+
     Ok(())
 }
 
@@ -104,7 +112,7 @@ mod tests {
         let version: i32 = conn
             .query_row("SELECT MAX(version) FROM schema_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(version, 1);
+        assert_eq!(version, 2);
     }
 
     #[test]
@@ -115,7 +123,7 @@ mod tests {
         let version: i32 = conn
             .query_row("SELECT MAX(version) FROM schema_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(version, 1);
+        assert_eq!(version, 2);
     }
 
     #[test]
@@ -172,6 +180,27 @@ mod tests {
              SELECT * FROM schema_version LIMIT 0;",
         )
         .unwrap();
+    }
+
+    #[test]
+    fn test_migration_v2_adds_cached_to_cc() {
+        let conn = open_overlay_db_memory().unwrap();
+        // Verify the cached_to and cached_cc columns exist by inserting into them
+        ensure_identity(&conn, 1, "test@msg").unwrap();
+        conn.execute(
+            "INSERT INTO cached_bodies (rowid, body_text, body_format, cached_at, cached_to, cached_cc) VALUES (1, 'body', 'plain', '2024-01-01', '[\"a@b\"]', '[]')",
+            [],
+        )
+        .unwrap();
+        let (to, cc): (String, String) = conn
+            .query_row(
+                "SELECT cached_to, cached_cc FROM cached_bodies WHERE rowid = 1",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(to, "[\"a@b\"]");
+        assert_eq!(cc, "[]");
     }
 
     #[test]

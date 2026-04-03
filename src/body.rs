@@ -39,21 +39,39 @@ pub struct EmailDetail {
 pub struct CachedBody {
     pub body_text: String,
     pub body_format: String,
+    pub to: Vec<String>,
+    pub cc: Vec<String>,
 }
 
 /// Get cached body from overlay DB, if available.
 pub fn get_cached_body(conn: &Connection, rowid: i64) -> BodyResult<Option<CachedBody>> {
-    let mut stmt =
-        conn.prepare("SELECT body_text, body_format FROM cached_bodies WHERE rowid = ?1")?;
+    let mut stmt = conn.prepare(
+        "SELECT body_text, body_format, cached_to, cached_cc FROM cached_bodies WHERE rowid = ?1",
+    )?;
     let result = stmt
         .query_row([rowid], |row| {
+            let to_raw: String = row.get(2)?;
+            let cc_raw: String = row.get(3)?;
             Ok(CachedBody {
                 body_text: row.get(0)?,
                 body_format: row.get(1)?,
+                to: deserialize_list(&to_raw),
+                cc: deserialize_list(&cc_raw),
             })
         })
         .ok();
     Ok(result)
+}
+
+fn serialize_list(items: &[String]) -> String {
+    serde_json::to_string(items).unwrap_or_default()
+}
+
+fn deserialize_list(raw: &str) -> Vec<String> {
+    if raw.is_empty() {
+        return vec![];
+    }
+    serde_json::from_str(raw).unwrap_or_default()
 }
 
 /// Store a parsed body in the overlay DB cache.
@@ -63,13 +81,17 @@ pub fn cache_body(
     message_id: &str,
     body_text: &str,
     body_format: &str,
+    to: &[String],
+    cc: &[String],
 ) -> BodyResult<()> {
     db::ensure_identity(conn, rowid, message_id)?;
     let now = Utc::now().to_rfc3339();
+    let to_json = serialize_list(to);
+    let cc_json = serialize_list(cc);
     conn.execute(
-        "INSERT INTO cached_bodies (rowid, body_text, body_format, cached_at) VALUES (?1, ?2, ?3, ?4)
-         ON CONFLICT(rowid) DO UPDATE SET body_text = excluded.body_text, body_format = excluded.body_format, cached_at = excluded.cached_at",
-        rusqlite::params![rowid, body_text, body_format, now],
+        "INSERT INTO cached_bodies (rowid, body_text, body_format, cached_at, cached_to, cached_cc) VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+         ON CONFLICT(rowid) DO UPDATE SET body_text = excluded.body_text, body_format = excluded.body_format, cached_at = excluded.cached_at, cached_to = excluded.cached_to, cached_cc = excluded.cached_cc",
+        rusqlite::params![rowid, body_text, body_format, now, to_json, cc_json],
     )?;
     Ok(())
 }
@@ -177,25 +199,16 @@ pub fn read_email_body(
     envelope_conn: &Connection,
     rowid: i64,
 ) -> BodyResult<EmailDetail> {
-    // Get metadata from envelope index
-    let (message_id, from, _to_raw, subject, date_sent): (String, String, String, String, f64) =
-        envelope_conn
-            .query_row(
-                "SELECT COALESCE(message_id, ''), COALESCE(sender, ''),
-                        COALESCE(subject, ''), COALESCE(subject, ''), COALESCE(date_sent, 0)
-                 FROM messages WHERE ROWID = ?1",
-                [rowid],
-                |row| {
-                    Ok((
-                        row.get(0)?,
-                        row.get(1)?,
-                        String::new(),
-                        row.get(3)?,
-                        row.get(4)?,
-                    ))
-                },
-            )
-            .map_err(BodyError::Sqlite)?;
+    // Get metadata from envelope index (to/cc not available here — comes from .emlx parsing)
+    let (message_id, from, subject, date_sent): (String, String, String, f64) = envelope_conn
+        .query_row(
+            "SELECT COALESCE(message_id, ''), COALESCE(sender, ''),
+                    COALESCE(subject, ''), COALESCE(date_sent, 0)
+             FROM messages WHERE ROWID = ?1",
+            [rowid],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )
+        .map_err(BodyError::Sqlite)?;
 
     let date = crate::data::nsdate_to_iso8601(date_sent);
 
@@ -205,8 +218,8 @@ pub fn read_email_body(
             id: rowid,
             message_id,
             from,
-            to: vec![],
-            cc: vec![],
+            to: cached.to,
+            cc: cached.cc,
             date,
             subject,
             body_text: cached.body_text,
@@ -235,8 +248,16 @@ pub fn read_email_body(
         .map(|h| h.get_value())
         .collect();
 
-    // Cache the body
-    cache_body(overlay_conn, rowid, &message_id, &body_text, &body_format)?;
+    // Cache the body (including to/cc from headers)
+    cache_body(
+        overlay_conn,
+        rowid,
+        &message_id,
+        &body_text,
+        &body_format,
+        &to,
+        &cc,
+    )?;
 
     Ok(EmailDetail {
         id: rowid,
@@ -259,11 +280,15 @@ mod tests {
     #[test]
     fn test_cache_and_retrieve_body() {
         let conn = open_overlay_db_memory().unwrap();
-        cache_body(&conn, 1, "msg@test", "Hello world", "plain").unwrap();
+        let to = vec!["alice@test.com".to_string()];
+        let cc = vec!["bob@test.com".to_string()];
+        cache_body(&conn, 1, "msg@test", "Hello world", "plain", &to, &cc).unwrap();
 
         let cached = get_cached_body(&conn, 1).unwrap().unwrap();
         assert_eq!(cached.body_text, "Hello world");
         assert_eq!(cached.body_format, "plain");
+        assert_eq!(cached.to, vec!["alice@test.com"]);
+        assert_eq!(cached.cc, vec!["bob@test.com"]);
     }
 
     #[test]
@@ -276,8 +301,8 @@ mod tests {
     #[test]
     fn test_cache_upsert() {
         let conn = open_overlay_db_memory().unwrap();
-        cache_body(&conn, 1, "msg@test", "Old body", "plain").unwrap();
-        cache_body(&conn, 1, "msg@test", "New body", "markdown").unwrap();
+        cache_body(&conn, 1, "msg@test", "Old body", "plain", &[], &[]).unwrap();
+        cache_body(&conn, 1, "msg@test", "New body", "markdown", &[], &[]).unwrap();
 
         let cached = get_cached_body(&conn, 1).unwrap().unwrap();
         assert_eq!(cached.body_text, "New body");
@@ -318,7 +343,7 @@ mod tests {
     fn test_second_read_from_cache() {
         let conn = open_overlay_db_memory().unwrap();
         // Pre-populate cache
-        cache_body(&conn, 42, "msg42@test", "Cached content", "plain").unwrap();
+        cache_body(&conn, 42, "msg42@test", "Cached content", "plain", &[], &[]).unwrap();
 
         // Verify it returns from cache
         let cached = get_cached_body(&conn, 42).unwrap().unwrap();
@@ -332,7 +357,16 @@ mod tests {
 
         {
             let conn = crate::db::open_overlay_db(&path).unwrap();
-            cache_body(&conn, 1, "msg@persist", "Persistent body", "markdown").unwrap();
+            cache_body(
+                &conn,
+                1,
+                "msg@persist",
+                "Persistent body",
+                "markdown",
+                &[],
+                &[],
+            )
+            .unwrap();
         }
         {
             let conn = crate::db::open_overlay_db(&path).unwrap();
