@@ -19,11 +19,14 @@
 - [x] mea.rs: Exit code 1 on error status; PATTERNS.md bootstrapped in open_overlay()
 - [x] triage.rs: Replaced eprintln with warnings vec in TriageSummary JSON
 
+## Eval Fixes (pass_rate 88% → targeting 100%)
+- [x] data.rs: Fixed post-pagination label/untriaged filtering — filters now applied BEFORE pagination via list_emails_filtered()
+
 ## Remaining
 - (none)
 
 ## Back-Pressure Status
 - Build: PASS
-- Tests: 78/78 passing (74 unit + 4 integration)
+- Tests: 81/81 passing (77 unit + 4 integration)
 - Clippy: PASS (zero warnings with -D warnings)
 - Format: PASS
