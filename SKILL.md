@@ -1,15 +1,26 @@
 # mea — Mail Executive Assistant
 
-This skill is installed at `~/.claude/skills/mea/SKILL.md`. Edit there, not here.
+## Skills
 
-Invoke with `/mea <instruction>` or `/mea daily-brief` from any Claude Code session.
+Two skills ship with this project (install both to `~/.claude/skills/mea/`):
 
-## Source & Rebuild
+| Skill | File | Command | Purpose |
+|---|---|---|---|
+| mea | `skill/SKILL.md` | `/mea <instruction>` | Daily email management, triage, briefings |
+| mea-onboard | `skill/mea-onboard.md` | `/mea-onboard` | First-time setup interview |
+
+## Quick Start
+
+See `QUICKSTART.md` for full setup instructions.
 
 ```bash
-cd /Volumes/CORE-02/projects/outlook-ea
 cargo build --release
-# Symlink at ~/.cargo/bin/mea auto-updates
+ln -sf "$(pwd)/target/release/mea" ~/.cargo/bin/mea
+mkdir -p ~/.mea ~/.claude/skills/mea
+cp skill/SKILL.md ~/.claude/skills/mea/SKILL.md
+cp skill/mea-onboard.md ~/.claude/skills/mea/mea-onboard.md
+mea sync
+# Then run /mea-onboard in Claude Code
 ```
 
 ## Data
