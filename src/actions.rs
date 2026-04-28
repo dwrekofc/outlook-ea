@@ -46,9 +46,19 @@ fn escape_applescript(s: &str) -> String {
     s.replace('\\', "\\\\").replace('"', "\\\"")
 }
 
+/// Normalize a message ID for Apple Mail AppleScript queries.
+/// Apple Mail stores message ids without enclosing angle brackets, but mea
+/// stores the canonical RFC form (with brackets). Strip a single pair if present.
+fn normalize_message_id(s: &str) -> &str {
+    let s = s.trim();
+    s.strip_prefix('<')
+        .and_then(|s| s.strip_suffix('>'))
+        .unwrap_or(s)
+}
+
 /// Delete (move to trash) a single email by message ID.
 pub fn delete_email(message_id: &str) -> ActionResult<()> {
-    let safe_id = escape_applescript(message_id);
+    let safe_id = escape_applescript(normalize_message_id(message_id));
     let script = format!(
         r#"tell application "Mail"
             set msgs to (every message of inbox whose message id is "{safe_id}")
@@ -63,7 +73,7 @@ pub fn delete_email(message_id: &str) -> ActionResult<()> {
 
 /// Archive a single email (move out of inbox).
 pub fn archive_email(message_id: &str) -> ActionResult<()> {
-    let safe_id = escape_applescript(message_id);
+    let safe_id = escape_applescript(normalize_message_id(message_id));
     let script = format!(
         r#"tell application "Mail"
             set msgs to (every message of inbox whose message id is "{safe_id}")
@@ -78,7 +88,7 @@ pub fn archive_email(message_id: &str) -> ActionResult<()> {
 
 /// Flag or unflag an email.
 pub fn set_flag(message_id: &str, flagged: bool) -> ActionResult<()> {
-    let safe_id = escape_applescript(message_id);
+    let safe_id = escape_applescript(normalize_message_id(message_id));
     let flag_val = if flagged { "true" } else { "false" };
     let script = format!(
         r#"tell application "Mail"
@@ -94,7 +104,7 @@ pub fn set_flag(message_id: &str, flagged: bool) -> ActionResult<()> {
 
 /// Mark an email as read or unread.
 pub fn set_read_status(message_id: &str, read: bool) -> ActionResult<()> {
-    let safe_id = escape_applescript(message_id);
+    let safe_id = escape_applescript(normalize_message_id(message_id));
     let read_val = if read { "true" } else { "false" };
     let script = format!(
         r#"tell application "Mail"
