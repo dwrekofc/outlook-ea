@@ -37,3 +37,7 @@ Canonical runtime data on Derek's machine:
 Do not store durable productivity logic only inside this skill file.
 
 MEA reads vault’s `database_url` and `auth_token` from `~/.config/vault/config.json` (or `VAULT_CONFIG`). Vault owns schema migration 003; MEA uses the existing schema.
+
+Shared context uses one Turso graph, profiles `personal` | `mea`, through
+`vault graph`, `mea graph`, or `pcg`. Use canonical IDs and the shared
+`~/.config/vault/config.json`; vault-cli owns migrations.

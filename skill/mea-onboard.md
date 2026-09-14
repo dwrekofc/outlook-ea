@@ -215,3 +215,7 @@ If "Run daily brief" — execute `mea sync` then hand off to the daily brief wor
 - Always confirm before creating rules that auto-trash (destructive)
 - Show what you're doing — after each `mea graph add` or `mea graph add-rule`, briefly confirm what was created
 - If the user describes a workflow that doesn't exist in the CLI, note it as a feature request rather than pretending it works
+
+Shared context uses one Turso graph, profiles `personal` | `mea`, through
+`vault graph`, `mea graph`, or `pcg`. Use canonical IDs and the shared
+`~/.config/vault/config.json`; vault-cli owns migrations.

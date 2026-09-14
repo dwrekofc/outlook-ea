@@ -52,3 +52,7 @@ Labels: `1=Follow Up`, `2=Waiting`, `3=Reference`, `4=Read Later`, `5=Receipts`,
 - Destructive actions require explicit user confirmation and `--yes`.
 - Do not bulk execute dry-run suggestions without reading for false positives.
 - VIP senders are never trash/archive candidates unless the user explicitly overrides.
+
+Shared context uses one Turso graph, profiles `personal` | `mea`, through
+`vault graph`, `mea graph`, or `pcg`. Use canonical IDs and the shared
+`~/.config/vault/config.json`; vault-cli owns migrations.

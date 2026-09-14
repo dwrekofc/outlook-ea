@@ -47,3 +47,7 @@ The full triage workflow, used whenever Derek asks for a real inbox clean-up (no
 
 Add deterministic sender/subject rules through `mea graph add-rule`, then run `mea graph dump`.
 Do not encode durable rules only inside a skill file.
+
+Shared context uses one Turso graph, profiles `personal` | `mea`, through
+`vault graph`, `mea graph`, or `pcg`. Use canonical IDs and the shared
+`~/.config/vault/config.json`; vault-cli owns migrations.

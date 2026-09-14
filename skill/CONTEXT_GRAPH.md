@@ -6,6 +6,12 @@
 > `vault graph nodes --json` for links and task/project references. Old IDs are
 > import provenance only.
 
+
+One graph has profiles `personal` | `mea`; entry points are `vault graph`,
+`mea graph`, and `pcg`. PCG creates personal nodes/history; updates retain
+existing provenance. Configuration is `~/.config/vault/config.json`.
+One person has one node, including work/personal email aliases (D16).
+
 Use this as the guide for MEA's mail rules and the sender/subject matchers behind them.
 
 ## Source Of Truth
@@ -34,3 +40,9 @@ mea graph dump
 - Use Markdown notes for rich narrative/context; use graph nodes/edges for operational facts agents must reuse.
 - Run `mea graph dump` after any graph mutation.
 - Do not store durable context only in chat, a skill file, or a one-off note.
+
+PCG resolves legacy personal IDs with `personal:<old-id>`; bare numeric IDs are
+canonical Turso IDs. Re-resolve stored references before reusing old commands.
+
+Gmail exception (approved 2026-09-14): PCG still reads `~/.gmail/gmail.db`
+read-only for email dates and reconciliation. D18 moves that cache later.

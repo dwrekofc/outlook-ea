@@ -41,3 +41,7 @@ CONTEXT:
 ```
 
 Prefer rolling tasks up to an existing project. If no project fits and the work is ongoing, attach context to an Area. Orphan tasks should be rare.
+
+Shared context uses one Turso graph, profiles `personal` | `mea`, through
+`vault graph`, `mea graph`, or `pcg`. Use canonical IDs and the shared
+`~/.config/vault/config.json`; vault-cli owns migrations.
