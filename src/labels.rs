@@ -1,9 +1,10 @@
 use chrono::Utc;
-use rusqlite::Connection;
+use libsql::params;
 use serde::Serialize;
+use std::collections::HashMap;
 use thiserror::Error;
 
-use crate::db;
+use crate::db::{self, Store};
 
 #[derive(Error, Debug)]
 pub enum LabelError {
@@ -11,8 +12,6 @@ pub enum LabelError {
     InvalidLabel(u8),
     #[error("Database error: {0}")]
     Db(#[from] db::DbError),
-    #[error("SQLite error: {0}")]
-    Sqlite(#[from] rusqlite::Error),
 }
 
 pub type LabelResult<T> = Result<T, LabelError>;
@@ -20,12 +19,12 @@ pub type LabelResult<T> = Result<T, LabelError>;
 #[derive(Debug, Clone, Serialize)]
 pub struct TriageLabel {
     pub rowid: i64,
+    pub message_id: String,
     pub label_number: u8,
     pub label_name: String,
     pub assigned_at: String,
 }
 
-/// Human-readable name for each label number.
 pub fn label_name(n: u8) -> &'static str {
     match n {
         1 => "Follow Up",
@@ -37,202 +36,135 @@ pub fn label_name(n: u8) -> &'static str {
     }
 }
 
-/// Assign a label (1-5) to an email. Replaces any existing label.
-/// Label 0 clears the label.
-pub fn assign_label(conn: &Connection, rowid: i64, message_id: &str, label: u8) -> LabelResult<()> {
+pub fn assign_label(store: &Store, rowid: i64, message_id: &str, label: u8) -> LabelResult<()> {
     if label > 5 {
         return Err(LabelError::InvalidLabel(label));
     }
 
-    // Ensure identity mapping exists
-    db::ensure_identity(conn, rowid, message_id)?;
-
+    let identity_id = db::ensure_identity(store, rowid, message_id)?;
     if label == 0 {
-        // Clear label
-        conn.execute("DELETE FROM labels WHERE rowid = ?1", [rowid])?;
+        store.execute(
+            "DELETE FROM mail_labels WHERE identity_id = ?1",
+            params![identity_id],
+        )?;
     } else {
         let now = Utc::now().to_rfc3339();
-        conn.execute(
-            "INSERT INTO labels (rowid, label_number, assigned_at) VALUES (?1, ?2, ?3)
-             ON CONFLICT(rowid) DO UPDATE SET label_number = excluded.label_number, assigned_at = excluded.assigned_at",
-            rusqlite::params![rowid, label, now],
+        store.execute(
+            "INSERT INTO mail_labels (identity_id, label_number, assigned_at)
+             VALUES (?1, ?2, ?3)
+             ON CONFLICT(identity_id) DO UPDATE SET
+                label_number = excluded.label_number,
+                assigned_at = excluded.assigned_at",
+            params![identity_id, i64::from(label), now],
         )?;
     }
 
     Ok(())
 }
 
-/// Get the label for a specific email, if any.
-pub fn get_label(conn: &Connection, rowid: i64) -> LabelResult<Option<TriageLabel>> {
-    let mut stmt =
-        conn.prepare("SELECT rowid, label_number, assigned_at FROM labels WHERE rowid = ?1")?;
-
-    let result = stmt
-        .query_row([rowid], |row| {
-            let rowid: i64 = row.get(0)?;
-            let label_number: u8 = row.get(1)?;
-            let assigned_at: String = row.get(2)?;
+pub fn get_label(store: &Store, rowid: i64, message_id: &str) -> LabelResult<Option<TriageLabel>> {
+    let Some(identity_id) = identity_id_for(store, rowid, message_id)? else {
+        return Ok(None);
+    };
+    Ok(store.one(
+        "SELECT l.label_number, l.assigned_at, i.message_id
+         FROM mail_labels l
+         JOIN mail_identities i ON i.id = l.identity_id
+         WHERE l.identity_id = ?1",
+        params![identity_id],
+        |row| {
+            let label_number = row.get::<i64>(0)? as u8;
             Ok(TriageLabel {
                 rowid,
+                message_id: row.get(2)?,
                 label_number,
                 label_name: label_name(label_number).to_string(),
-                assigned_at,
+                assigned_at: row.get(1)?,
             })
-        })
-        .ok();
-
-    Ok(result)
+        },
+    )?)
 }
 
-/// Get all emails with a specific label.
-pub fn get_emails_by_label(conn: &Connection, label: u8) -> LabelResult<Vec<i64>> {
+pub fn get_labels_for_messages(
+    store: &Store,
+    messages: &[(i64, String)],
+) -> LabelResult<HashMap<i64, u8>> {
+    let labels: HashMap<String, u8> = store
+        .all(
+            "SELECT i.message_id, l.label_number FROM mail_labels l
+         JOIN mail_identities i ON i.id = l.identity_id",
+            (),
+            |row| Ok((row.get(0)?, row.get::<i64>(1)? as u8)),
+        )?
+        .into_iter()
+        .collect();
+    Ok(messages
+        .iter()
+        .filter_map(|(rowid, message_id)| {
+            if message_id.trim().is_empty() {
+                return None;
+            }
+            labels.get(message_id).map(|label| (*rowid, *label))
+        })
+        .collect())
+}
+
+pub fn get_emails_by_label(store: &Store, label: u8) -> LabelResult<Vec<i64>> {
     if label == 0 || label > 5 {
         return Err(LabelError::InvalidLabel(label));
     }
-
-    let mut stmt =
-        conn.prepare("SELECT rowid FROM labels WHERE label_number = ?1 ORDER BY assigned_at DESC")?;
-    let rows: Vec<i64> = stmt
-        .query_map([label], |row| row.get(0))?
-        .filter_map(|r| r.ok())
-        .collect();
-
-    Ok(rows)
+    Ok(store.all(
+        "SELECT s.source_id
+         FROM mail_labels l
+         JOIN mail_identity_sources s ON s.identity_id = l.identity_id
+         WHERE l.label_number = ?1
+         ORDER BY l.assigned_at DESC",
+        params![i64::from(label)],
+        |row| Ok(row.get(0)?),
+    )?)
 }
 
-/// Get all rowids that have NO label (untriaged).
-/// Requires a list of candidate rowids (from the Envelope Index).
-pub fn get_untriaged(conn: &Connection, candidate_rowids: &[i64]) -> LabelResult<Vec<i64>> {
-    if candidate_rowids.is_empty() {
-        return Ok(vec![]);
+fn identity_id_for(store: &Store, _rowid: i64, message_id: &str) -> LabelResult<Option<i64>> {
+    if message_id.trim().is_empty() {
+        return Ok(None);
     }
-
-    let sql = format!(
-        "SELECT rowid FROM ({ids}) WHERE rowid NOT IN (SELECT rowid FROM labels)",
-        ids = candidate_rowids
-            .iter()
-            .map(|id| format!("SELECT {id} AS rowid"))
-            .collect::<Vec<_>>()
-            .join(" UNION ALL ")
-    );
-
-    let mut stmt = conn.prepare(&sql)?;
-    let rows: Vec<i64> = stmt
-        .query_map([], |row| row.get(0))?
-        .filter_map(|r| r.ok())
-        .collect();
-
-    Ok(rows)
-}
-
-/// Get all labels as a map (rowid -> label_number) for batch joining.
-pub fn get_all_labels(conn: &Connection) -> LabelResult<std::collections::HashMap<i64, u8>> {
-    let mut stmt = conn.prepare("SELECT rowid, label_number FROM labels")?;
-    let map = stmt
-        .query_map([], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, u8>(1)?)))?
-        .filter_map(|r| r.ok())
-        .collect();
-    Ok(map)
+    Ok(store.one(
+        "SELECT id FROM mail_identities WHERE message_id = ?1",
+        params![message_id],
+        |row| Ok(row.get(0)?),
+    )?)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::db::open_overlay_db_memory;
 
     #[test]
-    fn test_assign_and_get_label() {
-        let conn = open_overlay_db_memory().unwrap();
-        assign_label(&conn, 1, "msg@test", 3).unwrap();
-        let label = get_label(&conn, 1).unwrap().unwrap();
-        assert_eq!(label.label_number, 3);
-        assert_eq!(label.label_name, "Reference");
+    fn label_lookup_follows_message_id_not_reused_rowid() {
+        let store = db::test_store().unwrap();
+        assign_label(&store, 1, "old@test", 3).unwrap();
+        let stale = get_label(&store, 1, "new@test").unwrap();
+        assert!(stale.is_none());
     }
 
     #[test]
-    fn test_assign_replaces_existing() {
-        let conn = open_overlay_db_memory().unwrap();
-        assign_label(&conn, 1, "msg@test", 1).unwrap();
-        assign_label(&conn, 1, "msg@test", 4).unwrap();
-        let label = get_label(&conn, 1).unwrap().unwrap();
+    fn aliases_are_preserved_for_same_message() {
+        let store = db::test_store().unwrap();
+        assign_label(&store, 1, "same@test", 2).unwrap();
+        assign_label(&store, 99, "same@test", 4).unwrap();
+        let label = get_label(&store, 1, "same@test").unwrap().unwrap();
         assert_eq!(label.label_number, 4);
-        assert_eq!(label.label_name, "Read Later");
+        assert_eq!(get_emails_by_label(&store, 4).unwrap(), vec![1, 99]);
     }
 
     #[test]
-    fn test_clear_label() {
-        let conn = open_overlay_db_memory().unwrap();
-        assign_label(&conn, 1, "msg@test", 2).unwrap();
-        assign_label(&conn, 1, "msg@test", 0).unwrap();
-        let label = get_label(&conn, 1).unwrap();
-        assert!(label.is_none());
-    }
-
-    #[test]
-    fn test_invalid_label() {
-        let conn = open_overlay_db_memory().unwrap();
-        let err = assign_label(&conn, 1, "msg@test", 6);
-        assert!(err.is_err());
-    }
-
-    #[test]
-    fn test_get_emails_by_label() {
-        let conn = open_overlay_db_memory().unwrap();
-        assign_label(&conn, 10, "a@t", 1).unwrap();
-        assign_label(&conn, 20, "b@t", 1).unwrap();
-        assign_label(&conn, 30, "c@t", 2).unwrap();
-
-        let follow_ups = get_emails_by_label(&conn, 1).unwrap();
-        assert_eq!(follow_ups.len(), 2);
-        assert!(follow_ups.contains(&10));
-        assert!(follow_ups.contains(&20));
-    }
-
-    #[test]
-    fn test_get_untriaged() {
-        let conn = open_overlay_db_memory().unwrap();
-        assign_label(&conn, 1, "a@t", 1).unwrap();
-        // rowid 2 and 3 have no label
-        db::ensure_identity(&conn, 2, "b@t").unwrap();
-        db::ensure_identity(&conn, 3, "c@t").unwrap();
-
-        let untriaged = get_untriaged(&conn, &[1, 2, 3]).unwrap();
-        assert_eq!(untriaged.len(), 2);
-        assert!(untriaged.contains(&2));
-        assert!(untriaged.contains(&3));
-    }
-
-    #[test]
-    fn test_get_no_label_returns_none() {
-        let conn = open_overlay_db_memory().unwrap();
-        let label = get_label(&conn, 999).unwrap();
-        assert!(label.is_none());
-    }
-
-    #[test]
-    fn test_labels_persist() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("test.db");
-
-        {
-            let conn = crate::db::open_overlay_db(&path).unwrap();
-            assign_label(&conn, 5, "persist@test", 2).unwrap();
-        }
-        {
-            let conn = crate::db::open_overlay_db(&path).unwrap();
-            let label = get_label(&conn, 5).unwrap().unwrap();
-            assert_eq!(label.label_number, 2);
-        }
-    }
-
-    #[test]
-    fn test_get_all_labels() {
-        let conn = open_overlay_db_memory().unwrap();
-        assign_label(&conn, 1, "a@t", 1).unwrap();
-        assign_label(&conn, 2, "b@t", 3).unwrap();
-        let map = get_all_labels(&conn).unwrap();
-        assert_eq!(map.len(), 2);
-        assert_eq!(map[&1], 1);
-        assert_eq!(map[&2], 3);
+    fn clear_label_removes_identity_label() {
+        let store = db::test_store().unwrap();
+        assign_label(&store, 1, "msg@test", 2).unwrap();
+        assign_label(&store, 1, "msg@test", 0).unwrap();
+        assert!(get_label(&store, 1, "msg@test").unwrap().is_none());
     }
 }
+
+#[cfg(test)]
+mod regression_tests;

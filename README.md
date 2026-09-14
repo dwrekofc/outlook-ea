@@ -1,11 +1,11 @@
 # mea — Mail Executive Assistant
 
-A local-first email management system for macOS. Rust CLI + Claude Code skill that reads Apple Mail via AppleScript, stores state in SQLite, and gives you an AI-powered triage workflow with a knowledge graph of your contacts, teams, and projects.
+An email management system for macOS. Rust CLI + Claude Code skill that reads Apple Mail via AppleScript, stores shared state in Turso, and gives you an AI-powered triage workflow with a knowledge graph of your contacts, teams, and projects.
 
-No cloud services. No API keys. No data leaves your machine.
+Graph, labels, and cached bodies live in vault’s Turso database. MEA reuses vault’s existing credentials.
 
 ```
-Apple Mail ←──AppleScript──→ mea CLI ←──SQLite──→ overlay.db
+Apple Mail ←──AppleScript──→ mea CLI ←──libsql──→ vault Turso
                                 ↑
                           Claude Code skill
                         (SKILL.md + PATTERNS.md)
@@ -15,7 +15,7 @@ Apple Mail ←──AppleScript──→ mea CLI ←──SQLite──→ overla
 
 ## What It Does
 
-- **Sync** your Apple Mail inbox into a local SQLite database
+- **Sync** your Apple Mail inbox and read its local Envelope Index
 - **Triage** emails with auto-rules that match senders and subjects → trash, archive, or label
 - **Knowledge graph** of people, teams, orgs, projects, topics, and vendors — Claude uses this to understand who's emailing you and why it matters
 - **VIP protection** — important senders are never auto-trashed or archived
@@ -28,18 +28,17 @@ Apple Mail ←──AppleScript──→ mea CLI ←──SQLite──→ overla
 > Full walkthrough in [QUICKSTART.md](QUICKSTART.md)
 
 ```bash
-# Build
-cargo build --release
-
-# Install binary
-ln -sf "$(pwd)/target/release/mea" ~/.cargo/bin/mea
+# Install or refresh binary
+cargo install --path . --force
 
 # Install Claude Code skills
 mkdir -p ~/.claude/skills/mea
-cp skill/SKILL.md ~/.claude/skills/mea/SKILL.md
-cp skill/mea-onboard.md ~/.claude/skills/mea/mea-onboard.md
+cp skill/*.md ~/.claude/skills/mea/
 
-# First sync (creates ~/.mea/ and the database)
+# Vault must already be configured with schema migration 003
+mea graph list
+
+# First sync
 mea sync
 
 # Interactive onboarding (in Claude Code)
@@ -146,7 +145,7 @@ mea graph dump            # export full graph as markdown
 
 ## Labels
 
-Labels are stored in the overlay DB, not in Apple Mail. They're local-only triage markers:
+Labels are shared triage markers stored in Turso; they do not change Apple Mail folders:
 
 | # | Name | Meaning |
 |---|---|---|
@@ -159,11 +158,19 @@ Labels are stored in the overlay DB, not in Apple Mail. They're local-only triag
 
 ## Data Storage
 
-Everything lives under `~/.mea/`:
+Shared records use `~/.config/vault/config.json` (`database_url`, `auth_token`; `VAULT_CONFIG` may override the path). Vault owns the `graph_*` and `mail_*` schema. MEA does not apply migrations.
+
+Graph reads include both profiles; new nodes/history have MEA provenance. Updates preserve existing provenance. Use canonical IDs from `mea graph list/find`. Imported task fields remain visible through MEA’s existing metadata output.
+
+Mail labels and cached bodies follow portable `message_id` values; local rowids are preserved as aliases and never used to guess an unknown message’s identity. The Envelope Index is opened read-only through libsql.
+
+D17’s embedded replica is a later vault-owned change. The current remote connection is isolated in `src/db/connection.rs`; no replica is implemented here.
+
+Storage:
 
 | File | Contents |
 |---|---|
-| `overlay.db` | SQLite — graph nodes/edges, labels, triage state, cached email bodies |
+| Vault Turso `graph_*`, `mail_*` | Graph, identities, labels, cached bodies |
 | `GRAPH_CONTEXT.md` | Auto-generated markdown dump of the graph (read by Claude at session start) |
 
 And under `~/.claude/skills/mea/`:
@@ -181,7 +188,7 @@ src/
 ├── bin/mea.rs    — CLI entrypoint, command dispatch
 ├── cli.rs        — Clap argument parsing, JSON response formatters
 ├── data.rs       — Apple Mail envelope DB reader (V10 schema), email listing
-├── db.rs         — Overlay SQLite schema, migrations, connection management
+├── db.rs         — Vault configuration and libsql connection boundary
 ├── graph.rs      — Knowledge graph CRUD, traversal, VIP logic, rule engine
 ├── body.rs       — Email body extraction, MIME parsing, HTML→text, caching
 ├── labels.rs     — Label assignment and lookup
@@ -201,7 +208,7 @@ mea reads Apple Mail's local SQLite database directly (the V10 envelope index at
 
 For actions that modify mailbox state (delete, archive, flag, mark-read), mea shells out to `osascript` to run AppleScript commands against Mail.app. This requires macOS Automation permissions.
 
-Email bodies are extracted from the `.emlx` files on disk, parsed with `mailparse`, converted from HTML to text with `html2text`, and cached in the overlay DB for fast re-reads.
+Email bodies are extracted from the `.emlx` files on disk, parsed with `mailparse`, converted from HTML to text with `html2text`, and cached in Turso for fast re-reads.
 
 ## Customization
 
@@ -212,7 +219,7 @@ This project was built for one person's workflow, then generalized. You can chan
 | **Workflows** | Daily brief steps, triage flow, review modes | Edit `~/.claude/skills/mea/SKILL.md` |
 | **Rules** | What gets auto-trashed, archived, or labeled | `mea graph add-rule` or edit rules in graph |
 | **Labels** | Rename or repurpose the 5 label slots | Edit SKILL.md label descriptions |
-| **Graph schema** | Add new node/edge types | Modify `src/graph.rs` |
+| **Graph schema** | Change shared storage | Propose a vault-cli migration; MEA does not own schema |
 | **CLI commands** | Add new subcommands or flags | Modify `src/cli.rs` + `src/bin/mea.rs` |
 | **Mail source** | Adapt for a different mail client | Replace `src/data.rs` and `src/actions.rs` |
 | **Preferences** | Triage aggressiveness, patterns | Append to `~/.claude/skills/mea/PATTERNS.md` |
@@ -223,7 +230,7 @@ The `/mea-onboard` skill is designed to help you set up your own version interac
 
 **Why Apple Mail?** It stores email locally in a well-documented SQLite + emlx format. No OAuth, no API rate limits, no token refresh. The data is already on your disk.
 
-**Why a separate overlay DB?** Apple Mail's database is read-only (and shared with the system). The overlay keeps mea's state (labels, graph, cached bodies) separate so there's zero risk of corrupting Mail.
+**Why the unified vault database?** Personal and mail context share people and projects. Turso provides one graph and one credential store across machines; Apple Mail’s own database remains read-only.
 
 **Why Claude Code as the interface?** Email triage is a judgment call — "is this important?" depends on context that's hard to encode in static rules. Claude reads the graph, the patterns, and the email content, then makes suggestions. The skill file is the control surface — you can change how Claude behaves by editing markdown.
 

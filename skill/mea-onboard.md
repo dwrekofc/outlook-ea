@@ -26,12 +26,13 @@ Before starting the interview, verify the installation:
 ```bash
 which mea          # binary exists
 ls /Users/I852000/vault/utilities/context-profiles/mea/  # vault data dir exists
+mea graph list    # shared vault config and schema are ready
 mea sync 2>&1      # can talk to Mail.app
 ```
 
 If anything fails, help the user fix it before proceeding. Refer them to QUICKSTART.md for setup steps.
 
-If `mea sync` succeeds, continue. The database is now initialized.
+Continue when both commands succeed. Vault must already be configured in `~/.config/vault/config.json` (or `VAULT_CONFIG`) with `database_url` and `auth_token`, and schema migration 003 applied. MEA does not initialize the shared database.
 
 ---
 

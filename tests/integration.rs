@@ -1,10 +1,19 @@
 use std::process::Command;
 
+fn isolated_command(home: &std::path::Path) -> Command {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_mea"));
+    command
+        .env("HOME", home)
+        .env("VAULT_CONFIG", home.join("vault-config.json"));
+    command
+}
+
 #[test]
 fn test_exit_code_zero_on_success_commands() {
     // `mea rules list` should succeed even without Mail.app if rules.toml exists or defaults
     // But we can test that clap parsing works — an unknown command gives non-zero from clap
-    let output = Command::new(env!("CARGO_BIN_EXE_mea"))
+    let home = tempfile::tempdir().unwrap();
+    let output = isolated_command(home.path())
         .args(["rules", "list"])
         .output()
         .expect("failed to run mea");
@@ -26,7 +35,8 @@ fn test_exit_code_zero_on_success_commands() {
 #[test]
 fn test_exit_code_nonzero_on_error() {
     // Reading a nonexistent email ID should produce an error
-    let output = Command::new(env!("CARGO_BIN_EXE_mea"))
+    let home = tempfile::tempdir().unwrap();
+    let output = isolated_command(home.path())
         .args(["read", "999999999"])
         .output()
         .expect("failed to run mea");
@@ -40,7 +50,8 @@ fn test_exit_code_nonzero_on_error() {
 #[test]
 fn test_no_stderr_on_error() {
     // Even on errors, no output should go to stderr
-    let output = Command::new(env!("CARGO_BIN_EXE_mea"))
+    let home = tempfile::tempdir().unwrap();
+    let output = isolated_command(home.path())
         .args(["read", "999999999"])
         .output()
         .expect("failed to run mea");
@@ -51,20 +62,20 @@ fn test_no_stderr_on_error() {
 
 #[test]
 fn test_patterns_md_created() {
-    // When mea creates ~/.mea/, PATTERNS.md should be bootstrapped
-    let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
-    let patterns_path = std::path::PathBuf::from(&home)
-        .join(".mea")
-        .join("PATTERNS.md");
-
-    // `mea label` triggers open_overlay() before open_envelope()
-    // The label command will error, but open_overlay() runs first
-    let _ = Command::new(env!("CARGO_BIN_EXE_mea"))
+    let home = tempfile::tempdir().unwrap();
+    let patterns_path = home.path().join(".mea/PATTERNS.md");
+    let _ = isolated_command(home.path())
         .args(["label", "1", "1"])
-        .output();
-
-    assert!(
-        patterns_path.exists(),
-        "PATTERNS.md should exist at {patterns_path:?}"
+        .output()
+        .unwrap();
+    assert!(patterns_path.exists());
+    std::fs::write(&patterns_path, "Existing preferences").unwrap();
+    let _ = isolated_command(home.path())
+        .args(["label", "1", "1"])
+        .output()
+        .unwrap();
+    assert_eq!(
+        std::fs::read_to_string(patterns_path).unwrap(),
+        "Existing preferences"
     );
 }

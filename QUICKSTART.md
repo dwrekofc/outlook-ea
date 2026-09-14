@@ -1,6 +1,6 @@
 # mea — Quick Start Guide
 
-mea is a CLI + Claude Code skill that turns your Apple Mail inbox into a managed system with auto-triage rules, a knowledge graph of your contacts/teams/projects, task tracking, and daily briefings. Everything runs locally — no cloud services, no API keys. Just Apple Mail, SQLite, and Claude Code.
+mea is a CLI + Claude Code skill that turns your Apple Mail inbox into a managed system with auto-triage rules, a knowledge graph of your contacts/teams/projects, task tracking, and daily briefings. Mail access is local; shared graph, labels, and cached bodies use vault’s Turso database.
 
 ## Prerequisites
 
@@ -17,10 +17,10 @@ cargo build --release
 
 ## 2. Install the binary
 
-Symlink into your PATH so it's available everywhere:
+Install a standalone binary into your PATH:
 
 ```bash
-ln -sf "$(pwd)/target/release/mea" ~/.cargo/bin/mea
+cargo install --path . --force
 ```
 
 Verify: `mea --help`
@@ -31,18 +31,20 @@ Verify: `mea --help`
 mkdir -p ~/.mea
 ```
 
-This is where mea stores everything:
+Configure vault first: MEA reads `database_url` and `auth_token` from `~/.config/vault/config.json` (or `VAULT_CONFIG`). Vault must have applied migration 003. Verify with `mea graph list`; MEA never initializes the shared schema.
+
+Shared storage and local context:
 
 | File | Purpose | Created by |
 |---|---|---|
-| `~/.mea/overlay.db` | SQLite DB — graph nodes, edges, labels, cached email bodies | `mea sync` (first run) |
+| Vault Turso `graph_*`, `mail_*` | Graph, identities, labels, cached bodies | Vault owns schema |
 | `~/.mea/GRAPH_CONTEXT.md` | Human-readable dump of your graph — loaded by Claude at session start | `mea graph dump` |
 
 ## 4. Install the Claude Code skill
 
 ```bash
 mkdir -p ~/.claude/skills/mea
-cp skill/SKILL.md ~/.claude/skills/mea/SKILL.md
+cp skill/*.md ~/.claude/skills/mea/
 ```
 
 Create the patterns file (starts empty, grows as you triage):
@@ -61,7 +63,7 @@ EOF
 mea sync
 ```
 
-This reads your Apple Mail inbox via AppleScript and caches message metadata + bodies into `~/.mea/overlay.db`. macOS will prompt you to grant Terminal/iTerm access to Mail — allow it.
+This asks Apple Mail to check for new mail. MEA reads the local Envelope Index; bodies are cached in Turso when read. macOS will prompt you to grant Terminal/iTerm access to Mail — allow it.
 
 ## 6. Run onboarding
 
@@ -84,7 +86,7 @@ See the "Onboarding" section below for details.
 ## Architecture
 
 ```
-Apple Mail ←(AppleScript)→ mea CLI ←(SQLite)→ overlay.db
+Apple Mail ←(AppleScript)→ mea CLI ←(libsql)→ vault Turso
                               ↑
                         Claude Code skill
                         (SKILL.md + PATTERNS.md)
@@ -92,11 +94,11 @@ Apple Mail ←(AppleScript)→ mea CLI ←(SQLite)→ overlay.db
                          You, via /mea
 ```
 
-**mea CLI** — Rust binary. Reads Mail via AppleScript, stores everything in SQLite. Handles sync, search, labels, triage rule evaluation, and the full graph CRUD. All output is JSON.
+**mea CLI** — Rust binary. Reads the local Envelope Index and uses AppleScript for mailbox actions. Shared storage uses Turso. Handles sync, search, labels, triage rule evaluation, and the full graph CRUD. All output is JSON.
 
 **Claude Code skill** — SKILL.md teaches Claude the CLI commands and workflows. Claude is the interface layer — it calls `mea` commands, parses JSON output, and presents things to you conversationally. You never need to run `mea` commands directly.
 
-**Overlay DB** — All state lives in `~/.mea/overlay.db`. Labels, triage rules, graph nodes/edges, cached bodies. Nothing is written back to Apple Mail (except mark-as-read/archive/delete actions you explicitly approve).
+**Unified database** — Shared state lives in the vault Turso database. Local preferences and generated context dumps remain under `~/.mea`. Labels, triage rules, graph nodes/edges, cached bodies. Nothing is written back to Apple Mail (except mark-as-read/archive/delete actions you explicitly approve).
 
 **Graph** — A lightweight knowledge graph storing people, teams, orgs, projects, topics, vendors, and rules as nodes with typed edges (manages, reports_to, member_of, etc.). This is what powers auto-triage — rules match senders/subjects and apply actions.
 
@@ -147,7 +149,7 @@ Free-form instructions work too:
 ## Key Concepts
 
 ### Labels (1-5)
-Stored in the overlay DB, not in Apple Mail:
+Stored in the shared vault Turso database:
 1. **Follow Up** — needs action from you
 2. **Waiting** — you're waiting on someone else
 3. **Reference** — keep for reference, no action needed
