@@ -4,9 +4,9 @@ Use this as the main rulebook for interpreting email, tasks, projects, and conte
 
 ## Canonical Rule Sources
 
-- Learned preferences: `/Users/I852000/vault/utilities/context-profiles/mea/PATTERNS.md`
+- Learned preferences: `${VAULT_NOTES}/utilities/context-profiles/mea/PATTERNS.md`
 - Deterministic graph rules: the unified vault Turso database (`graph_*` and `mail_*`)
-- Human-readable graph: `/Users/I852000/vault/utilities/context-profiles/mea/GRAPH_CONTEXT.md`
+- Human-readable graph: `${VAULT_NOTES}/utilities/context-profiles/mea/MEA_GRAPH_CONTEXT.md`
 
 Read `PATTERNS.md` before any email triage. Append learned behavior there; never delete prior entries.
 
@@ -51,3 +51,5 @@ Do not encode durable rules only inside a skill file.
 Shared context uses one Turso graph, profiles `personal` | `mea`, through
 `vault graph`, `mea graph`, or `pcg`. Use canonical IDs and the shared
 `~/.config/vault/config.json`; vault-cli owns migrations.
+
+`VAULT_NOTES` denotes `notes_path` from `VAULT_CONFIG` (default `~/.config/vault/config.json`), falling back to `~/vault`. Resolve it before running shell examples. MEA owns `MEA_GRAPH_CONTEXT.md`; the scheduled vault graph-dump script owns the separate `GRAPH_CONTEXT.md`.

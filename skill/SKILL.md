@@ -29,9 +29,9 @@ Before doing mail/task/context work, read those four references. Use `mea` for m
 
 Canonical runtime data on Derek's machine:
 
-- MEA data: `/Users/I852000/vault/utilities/context-profiles/mea`
-- Graph dump: `/Users/I852000/vault/utilities/context-profiles/mea/GRAPH_CONTEXT.md`
-- Learned preferences: `/Users/I852000/vault/utilities/context-profiles/mea/PATTERNS.md`
+- MEA data: `${VAULT_NOTES}/utilities/context-profiles/mea`
+- Graph dump: `${VAULT_NOTES}/utilities/context-profiles/mea/MEA_GRAPH_CONTEXT.md`
+- Learned preferences: `${VAULT_NOTES}/utilities/context-profiles/mea/PATTERNS.md`
 - Shared graph/tasks/rules/mail storage: the unified vault Turso database (`graph_*` and `mail_*`)
 
 Do not store durable productivity logic only inside this skill file.
@@ -41,3 +41,5 @@ MEA reads vault’s `database_url` and `auth_token` from `~/.config/vault/config
 Shared context uses one Turso graph, profiles `personal` | `mea`, through
 `vault graph`, `mea graph`, or `pcg`. Use canonical IDs and the shared
 `~/.config/vault/config.json`; vault-cli owns migrations.
+
+`VAULT_NOTES` denotes `notes_path` from `VAULT_CONFIG` (default `~/.config/vault/config.json`), falling back to `~/vault`. Resolve it before running shell examples. MEA owns `MEA_GRAPH_CONTEXT.md`; the scheduled vault graph-dump script owns the separate `GRAPH_CONTEXT.md`.

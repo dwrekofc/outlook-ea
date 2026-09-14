@@ -160,9 +160,11 @@ Labels are shared triage markers stored in Turso; they do not change Apple Mail 
 
 Shared records use `~/.config/vault/config.json` (`database_url`, `auth_token`; `VAULT_CONFIG` may override the path). Vault owns the `graph_*` and `mail_*` schema. MEA does not apply migrations.
 
-Graph reads include both profiles; new nodes/history have MEA provenance. Updates preserve existing provenance. Use canonical IDs from `mea graph list/find`. Imported task fields remain visible through MEA’s existing metadata output.
+Graph reads include active nodes from both profiles (archived nodes are excluded); new nodes/history have MEA provenance. Updates preserve existing provenance. Use canonical IDs from `mea graph list/find`. Imported task fields remain visible through MEA’s existing metadata output.
 
 Mail labels and cached bodies follow portable `message_id` values; local rowids are preserved as aliases and never used to guess an unknown message’s identity. The Envelope Index is opened read-only through libsql.
+
+Multi-statement writes and read-modify-write updates use immediate transactions, including nested graph helpers. D17’s replica adapter must preserve this transaction boundary.
 
 D17’s embedded replica is a later vault-owned change. The current remote connection is isolated in `src/db/connection.rs`; no replica is implemented here.
 
@@ -171,7 +173,7 @@ Storage:
 | File | Contents |
 |---|---|
 | Vault Turso `graph_*`, `mail_*` | Graph, identities, labels, cached bodies |
-| `GRAPH_CONTEXT.md` | Auto-generated markdown dump of the graph (read by Claude at session start) |
+| `<notes_path>/utilities/context-profiles/mea/MEA_GRAPH_CONTEXT.md` | MEA-owned graph dump; separate from the scheduled vault `GRAPH_CONTEXT.md` |
 
 And under `~/.claude/skills/mea/`:
 
@@ -239,3 +241,5 @@ The `/mea-onboard` skill is designed to help you set up your own version interac
 ## License
 
 MIT
+
+MEA requires vault schema 4 (`vault init` after installing the updated vault binary). Live mail aliases use `(hostname, rowid)` and update with a warning when reused. Each Mac must have a distinct hostname. Imported aliases remain historical provenance. `notes_path` comes from vault config and defaults to `~/vault`; no `~/.mea` symlink is required for dumps.

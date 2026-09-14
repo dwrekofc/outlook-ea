@@ -37,29 +37,31 @@ pub fn label_name(n: u8) -> &'static str {
 }
 
 pub fn assign_label(store: &Store, rowid: i64, message_id: &str, label: u8) -> LabelResult<()> {
-    if label > 5 {
-        return Err(LabelError::InvalidLabel(label));
-    }
+    store.transaction(|store| {
+        if label > 5 {
+            return Err(LabelError::InvalidLabel(label));
+        }
 
-    let identity_id = db::ensure_identity(store, rowid, message_id)?;
-    if label == 0 {
-        store.execute(
-            "DELETE FROM mail_labels WHERE identity_id = ?1",
-            params![identity_id],
-        )?;
-    } else {
-        let now = Utc::now().to_rfc3339();
-        store.execute(
-            "INSERT INTO mail_labels (identity_id, label_number, assigned_at)
+        let identity_id = db::ensure_identity(store, rowid, message_id)?;
+        if label == 0 {
+            store.execute(
+                "DELETE FROM mail_labels WHERE identity_id = ?1",
+                params![identity_id],
+            )?;
+        } else {
+            let now = Utc::now().to_rfc3339();
+            store.execute(
+                "INSERT INTO mail_labels (identity_id, label_number, assigned_at)
              VALUES (?1, ?2, ?3)
              ON CONFLICT(identity_id) DO UPDATE SET
                 label_number = excluded.label_number,
                 assigned_at = excluded.assigned_at",
-            params![identity_id, i64::from(label), now],
-        )?;
-    }
+                params![identity_id, i64::from(label), now],
+            )?;
+        }
 
-    Ok(())
+        Ok(())
+    })
 }
 
 pub fn get_label(store: &Store, rowid: i64, message_id: &str) -> LabelResult<Option<TriageLabel>> {
@@ -116,10 +118,10 @@ pub fn get_emails_by_label(store: &Store, label: u8) -> LabelResult<Vec<i64>> {
     Ok(store.all(
         "SELECT s.source_id
          FROM mail_labels l
-         JOIN mail_identity_sources s ON s.identity_id = l.identity_id
-         WHERE l.label_number = ?1
+         JOIN mail_machine_identity_sources s ON s.identity_id = l.identity_id
+         WHERE l.label_number = ?1 AND s.machine_id = ?2
          ORDER BY l.assigned_at DESC",
-        params![i64::from(label)],
+        params![i64::from(label), db::machine_id()?],
         |row| Ok(row.get(0)?),
     )?)
 }

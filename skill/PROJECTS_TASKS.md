@@ -7,10 +7,10 @@
 ## Source Of Truth
 
 - MEA graph tasks/projects currently live in the unified vault Turso database (`graph_*` and `mail_*`).
-- Human-readable task/project context is dumped to `/Users/I852000/vault/utilities/context-profiles/mea/GRAPH_CONTEXT.md`.
-- New Markdown project notes belong in `/Users/I852000/vault/1-projects`.
-- Ongoing responsibility notes belong in `/Users/I852000/vault/2-areas`.
-- Raw captures belong in `/Users/I852000/vault/inbox`.
+- Human-readable task/project context is dumped to `${VAULT_NOTES}/utilities/context-profiles/mea/MEA_GRAPH_CONTEXT.md`.
+- New Markdown project notes belong in `${VAULT_NOTES}/1-projects`.
+- Ongoing responsibility notes belong in `${VAULT_NOTES}/2-areas`.
+- Raw captures belong in `${VAULT_NOTES}/inbox`.
 
 ## Commands
 
@@ -45,3 +45,5 @@ Prefer rolling tasks up to an existing project. If no project fits and the work 
 Shared context uses one Turso graph, profiles `personal` | `mea`, through
 `vault graph`, `mea graph`, or `pcg`. Use canonical IDs and the shared
 `~/.config/vault/config.json`; vault-cli owns migrations.
+
+`VAULT_NOTES` denotes `notes_path` from `VAULT_CONFIG` (default `~/.config/vault/config.json`), falling back to `~/vault`. Resolve it before running shell examples. MEA owns `MEA_GRAPH_CONTEXT.md`; the scheduled vault graph-dump script owns the separate `GRAPH_CONTEXT.md`.

@@ -28,31 +28,33 @@ pub fn add_node(
     metadata: Option<&str>,
     is_vip: bool,
 ) -> GraphResult<i64> {
-    let now = Utc::now().to_rfc3339();
-    let meta = normalize_metadata(metadata)?;
-    let id = store
-        .one(
-            "INSERT INTO graph_nodes
+    store.transaction(|store| {
+        let now = Utc::now().to_rfc3339();
+        let meta = normalize_metadata(metadata)?;
+        let id = store
+            .one(
+                "INSERT INTO graph_nodes
              (node_type,name,email,description,status,due_date,metadata,is_vip,archived,
               created_at,updated_at,profile)
              VALUES (?1,?2,?3,?4,?5,?6,?7,?8,0,?9,?9,'mea')
              RETURNING id",
-            params![
-                node_type,
-                name,
-                email,
-                description,
-                scalar(&meta, "status"),
-                scalar(&meta, "due_date"),
-                meta.to_string(),
-                is_vip as i64,
-                now
-            ],
-            |row| Ok(row.get::<i64>(0)?),
-        )?
-        .expect("INSERT RETURNING yielded no row");
-    record_history(store, Some(id), "node_created", name)?;
-    Ok(id)
+                params![
+                    node_type,
+                    name,
+                    email,
+                    description,
+                    scalar(&meta, "status"),
+                    scalar(&meta, "due_date"),
+                    meta.to_string(),
+                    is_vip as i64,
+                    now
+                ],
+                |row| Ok(row.get::<i64>(0)?),
+            )?
+            .expect("INSERT RETURNING yielded no row");
+        record_history(store, Some(id), "node_created", name)?;
+        Ok(id)
+    })
 }
 
 pub fn get_node(store: &Store, id: i64) -> GraphResult<Node> {
@@ -97,13 +99,14 @@ pub fn update_node(
     metadata: Option<&str>,
     is_vip: Option<bool>,
 ) -> GraphResult<()> {
-    let current = node_record(store, id)?;
-    let meta = match metadata {
-        Some(value) => merge_metadata(&current.metadata, value)?,
-        None => current.metadata,
-    };
-    store.execute(
-        "UPDATE graph_nodes SET
+    store.transaction(|store| {
+        let current = node_record(store, id)?;
+        let meta = match metadata {
+            Some(value) => merge_metadata(&current.metadata, value)?,
+            None => current.metadata,
+        };
+        store.execute(
+            "UPDATE graph_nodes SET
             name = COALESCE(?1, name),
             email = COALESCE(?2, email),
             description = COALESCE(?3, description),
@@ -113,25 +116,28 @@ pub fn update_node(
             is_vip = COALESCE(?7, is_vip),
             updated_at = ?8
          WHERE id = ?9",
-        params![
-            name,
-            email,
-            description,
-            meta.to_string(),
-            scalar(&meta, "status"),
-            scalar(&meta, "due_date"),
-            is_vip.map(|value| value as i64),
-            Utc::now().to_rfc3339(),
-            id
-        ],
-    )?;
-    record_history(store, Some(id), "node_updated", &id.to_string())
+            params![
+                name,
+                email,
+                description,
+                meta.to_string(),
+                scalar(&meta, "status"),
+                scalar(&meta, "due_date"),
+                is_vip.map(|value| value as i64),
+                Utc::now().to_rfc3339(),
+                id
+            ],
+        )?;
+        record_history(store, Some(id), "node_updated", &id.to_string())
+    })
 }
 
 pub fn remove_node(store: &Store, id: i64) -> GraphResult<()> {
-    get_node(store, id)?;
-    store.execute("DELETE FROM graph_nodes WHERE id = ?1", params![id])?;
-    record_history(store, None, "node_removed", &id.to_string())
+    store.transaction(|store| {
+        get_node(store, id)?;
+        store.execute("DELETE FROM graph_nodes WHERE id = ?1", params![id])?;
+        record_history(store, None, "node_removed", &id.to_string())
+    })
 }
 
 pub fn add_edge(
@@ -142,32 +148,34 @@ pub fn add_edge(
     context: Option<&str>,
     weight: Option<f64>,
 ) -> GraphResult<i64> {
-    get_node(store, source_id)?;
-    get_node(store, target_id)?;
-    let id = store
-        .one(
-            "INSERT INTO graph_edges
+    store.transaction(|store| {
+        get_node(store, source_id)?;
+        get_node(store, target_id)?;
+        let id = store
+            .one(
+                "INSERT INTO graph_edges
              (source_id,target_id,predicate,context,weight,created_at,metadata)
              VALUES (?1,?2,?3,?4,?5,?6,'{}') RETURNING id",
-            params![
-                source_id,
-                target_id,
-                predicate,
-                context,
-                weight.unwrap_or(1.0),
-                Utc::now().to_rfc3339()
-            ],
-            |row| Ok(row.get::<i64>(0)?),
-        )?
-        .expect("INSERT RETURNING yielded no row");
-    record_history(store, Some(source_id), "edge_created", predicate)?;
-    Ok(id)
+                params![
+                    source_id,
+                    target_id,
+                    predicate,
+                    context,
+                    weight.unwrap_or(1.0),
+                    Utc::now().to_rfc3339()
+                ],
+                |row| Ok(row.get::<i64>(0)?),
+            )?
+            .expect("INSERT RETURNING yielded no row");
+        record_history(store, Some(source_id), "edge_created", predicate)?;
+        Ok(id)
+    })
 }
 
 fn node_sql(tail: &str) -> String {
     format!(
-        "SELECT id,node_type,name,email,description,metadata,is_vip,created_at,updated_at,status,due_date
-         FROM graph_nodes {tail}"
+        "SELECT id,node_type,name,email,description,metadata,is_vip,created_at,updated_at,status,due_date,profile,archived
+         FROM (SELECT * FROM graph_nodes WHERE archived=0) {tail}"
     )
 }
 
@@ -188,6 +196,8 @@ fn row_to_node(row: &libsql::Row) -> anyhow::Result<Node> {
         is_vip: row.get::<i64>(6)? != 0,
         created_at: row.get(7)?,
         updated_at: row.get(8)?,
+        profile: row.get(11)?,
+        archived: row.get::<i64>(12)? != 0,
     })
 }
 
@@ -206,7 +216,7 @@ fn row_to_edge(row: &libsql::Row) -> anyhow::Result<Edge> {
 fn edge_sql(tail: &str) -> String {
     format!(
         "SELECT id,source_id,target_id,predicate,context,weight,created_at
-         FROM graph_edges {tail}"
+         FROM (SELECT * FROM graph_edges WHERE source_id IN (SELECT id FROM graph_nodes WHERE archived=0) AND target_id IN (SELECT id FROM graph_nodes WHERE archived=0)) {tail}"
     )
 }
 

@@ -17,8 +17,8 @@ Use this as the guide for MEA's mail rules and the sender/subject matchers behin
 ## Source Of Truth
 
 - Shared graph: the unified vault Turso database (`graph_*` and `mail_*`)
-- Markdown dump: `/Users/I852000/vault/utilities/context-profiles/mea/GRAPH_CONTEXT.md`
-- Learned preferences: `/Users/I852000/vault/utilities/context-profiles/mea/PATTERNS.md`
+- Markdown dump: `${VAULT_NOTES}/utilities/context-profiles/mea/MEA_GRAPH_CONTEXT.md`
+- Learned preferences: `${VAULT_NOTES}/utilities/context-profiles/mea/PATTERNS.md`
 
 ## Graph Commands
 
@@ -46,3 +46,5 @@ canonical Turso IDs. Re-resolve stored references before reusing old commands.
 
 Gmail exception (approved 2026-09-14): PCG still reads `~/.gmail/gmail.db`
 read-only for email dates and reconciliation. D18 moves that cache later.
+
+`VAULT_NOTES` denotes `notes_path` from `VAULT_CONFIG` (default `~/.config/vault/config.json`), falling back to `~/vault`. Resolve it before running shell examples. MEA owns `MEA_GRAPH_CONTEXT.md`; the scheduled vault graph-dump script owns the separate `GRAPH_CONTEXT.md`.

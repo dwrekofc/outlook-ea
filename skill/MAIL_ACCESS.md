@@ -7,10 +7,10 @@ Use this when the user asks about inbox, email triage, daily briefings, mail-der
 - CLI: `mea`, installed at `~/.cargo/bin/mea`. Mail access uses the local Apple Mail store; shared storage requires vault configuration and Turso connectivity.
 - Source: `/Volumes/CORE-02/projects/outlook-ea`. Install or refresh with `cargo install --path . --force`; the installed binary runs independently of the Dev Drive.
 - Credentials: `~/.config/vault/config.json` (`database_url`, `auth_token`; `VAULT_CONFIG` may override its path). Vault owns shared schema migrations.
-- Runtime/data: `/Users/I852000/vault/utilities/context-profiles/mea`
-- Compatibility path: `~/.mea -> /Users/I852000/vault/utilities/context-profiles/mea`
+- Runtime/data: `${VAULT_NOTES}/utilities/context-profiles/mea`
+- No `~/.mea` symlink is required for graph dumps.
 - Database: the unified vault Turso database (`graph_*` and `mail_*`)
-- Graph dump: `/Users/I852000/vault/utilities/context-profiles/mea/GRAPH_CONTEXT.md`
+- Graph dump: `${VAULT_NOTES}/utilities/context-profiles/mea/MEA_GRAPH_CONTEXT.md`
 
 ## Read Workflow
 
@@ -56,3 +56,7 @@ Labels: `1=Follow Up`, `2=Waiting`, `3=Reference`, `4=Read Later`, `5=Receipts`,
 Shared context uses one Turso graph, profiles `personal` | `mea`, through
 `vault graph`, `mea graph`, or `pcg`. Use canonical IDs and the shared
 `~/.config/vault/config.json`; vault-cli owns migrations.
+
+`VAULT_NOTES` denotes `notes_path` from `VAULT_CONFIG` (default `~/.config/vault/config.json`), falling back to `~/vault`. Resolve it before running shell examples. MEA owns `MEA_GRAPH_CONTEXT.md`; the scheduled vault graph-dump script owns the separate `GRAPH_CONTEXT.md`.
+
+Messages with an empty `message_id_header` cannot be labeled or cached in Turso. Apple Mail rowids alone are not shared identities. Live rowid aliases are scoped by hostname and refreshed on reuse; imported aliases remain historical provenance.

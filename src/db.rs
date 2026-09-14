@@ -1,4 +1,4 @@
-use std::path::Path;
+use std::{path::Path, rc::Rc};
 
 use anyhow::{Context, Result, bail};
 use libsql::{Connection, Database, params};
@@ -7,7 +7,7 @@ mod connection;
 use serde::{Deserialize, Serialize};
 use tokio::runtime::{Builder as RuntimeBuilder, Runtime};
 
-const REQUIRED_SCHEMA_VERSION: i64 = 3;
+const REQUIRED_SCHEMA_VERSION: i64 = 4;
 
 pub type DbError = anyhow::Error;
 pub type DbResult<T> = Result<T, DbError>;
@@ -16,12 +16,14 @@ pub type DbResult<T> = Result<T, DbError>;
 pub struct VaultSettings {
     pub database_url: Option<String>,
     pub auth_token: Option<String>,
+    pub notes_path: Option<std::path::PathBuf>,
 }
 
 pub struct Store {
-    _database: Database,
+    _database: Rc<Database>,
     connection: Connection,
-    runtime: Runtime,
+    runtime: Rc<Runtime>,
+    in_transaction: bool,
 }
 
 impl Store {
@@ -46,9 +48,10 @@ impl Store {
         let runtime = RuntimeBuilder::new_current_thread().enable_all().build()?;
         let (database, connection) = runtime.block_on(connection::open(url, auth_token))?;
         Ok(Self {
-            _database: database,
+            _database: Rc::new(database),
             connection,
-            runtime,
+            runtime: Rc::new(runtime),
+            in_transaction: false,
         })
     }
 
@@ -56,10 +59,49 @@ impl Store {
         let runtime = RuntimeBuilder::new_current_thread().enable_all().build()?;
         let (database, connection) = runtime.block_on(connection::read_only(path))?;
         Ok(Self {
-            _database: database,
+            _database: Rc::new(database),
             connection,
-            runtime,
+            runtime: Rc::new(runtime),
+            in_transaction: false,
         })
+    }
+
+    /// Nested graph helpers share the outer immediate transaction and its connection.
+    /// D17: read-modify-write operations must stay inside this boundary on replicas too.
+    pub fn transaction<T, E>(&self, apply: impl FnOnce(&Store) -> Result<T, E>) -> Result<T, E>
+    where
+        E: From<anyhow::Error>,
+    {
+        if self.in_transaction {
+            return apply(self);
+        }
+        let tx = self
+            .runtime
+            .block_on(
+                self.connection
+                    .transaction_with_behavior(libsql::TransactionBehavior::Immediate),
+            )
+            .map_err(anyhow::Error::from)?;
+        let scoped = Store {
+            _database: Rc::clone(&self._database),
+            connection: (*tx).clone(),
+            runtime: Rc::clone(&self.runtime),
+            in_transaction: true,
+        };
+        match apply(&scoped) {
+            Ok(value) => {
+                self.runtime
+                    .block_on(tx.commit())
+                    .map_err(anyhow::Error::from)?;
+                Ok(value)
+            }
+            Err(error) => {
+                self.runtime
+                    .block_on(tx.rollback())
+                    .map_err(anyhow::Error::from)?;
+                Err(error)
+            }
+        }
     }
 
     pub fn execute(&self, sql: &str, params: impl libsql::params::IntoParams) -> DbResult<u64> {
@@ -115,7 +157,7 @@ impl Store {
             )?
             .unwrap_or(0);
         if version < REQUIRED_SCHEMA_VERSION {
-            bail!("Vault database schema must be at version 3 or newer; run vault init/migrations");
+            bail!("Vault database schema must be at version 4 or newer; run vault init/migrations");
         }
         self.one("SELECT 1 FROM graph_nodes LIMIT 0", (), |_| Ok(()))?;
         self.one("SELECT 1 FROM mail_identities LIMIT 0", (), |_| Ok(()))?;
@@ -127,6 +169,7 @@ impl Store {
         // Copied from vault-cli migrations/003_graph_mail.sql as the test fixture.
         self.execute_batch("CREATE TABLE IF NOT EXISTS schema_migrations (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL);")?;
         self.execute_batch(include_str!("db/schema_fixture.sql"))?;
+        self.execute_batch(include_str!("db/machine_sources_fixture.sql"))?;
         Ok(())
     }
 }
@@ -139,6 +182,7 @@ pub fn test_store() -> DbResult<Store> {
 }
 
 pub fn ensure_identity(store: &Store, source_id: i64, message_id: &str) -> DbResult<i64> {
+    store.transaction(|store| {
     if message_id.trim().is_empty() {
         bail!("message_id is required for mail identity storage");
     }
@@ -154,12 +198,34 @@ pub fn ensure_identity(store: &Store, source_id: i64, message_id: &str) -> DbRes
             |row| Ok(row.get::<i64>(0)?),
         )?
         .context("mail identity was not created")?;
-    store.execute(
-        "INSERT OR IGNORE INTO mail_identity_sources (source_id, identity_id) VALUES (?1, ?2)",
-        params![source_id, identity_id],
+    let machine_id = machine_id()?;
+    let previous = store.one(
+        "SELECT identity_id FROM mail_machine_identity_sources WHERE machine_id=?1 AND source_id=?2",
+        params![machine_id.clone(), source_id], |r| Ok(r.get::<i64>(0)?),
     )?;
+    store.execute(
+        "INSERT INTO mail_machine_identity_sources(machine_id,source_id,identity_id) VALUES (?1,?2,?3)
+         ON CONFLICT(machine_id,source_id) DO UPDATE SET identity_id=excluded.identity_id",
+        params![machine_id, source_id, identity_id],
+    )?;
+    if previous.is_some_and(|old| old != identity_id) {
+        eprintln!("warning: Apple Mail rowid {source_id} was reassigned on this machine");
+    }
     Ok(identity_id)
+    })
 }
 
 #[cfg(test)]
 mod regression_tests;
+
+pub(crate) fn machine_id() -> DbResult<String> {
+    let output = std::process::Command::new("hostname")
+        .output()
+        .context("cannot determine machine hostname for mail aliases")?;
+    let hostname = String::from_utf8(output.stdout)?.trim().to_owned();
+    anyhow::ensure!(
+        output.status.success() && !hostname.is_empty(),
+        "machine hostname is missing"
+    );
+    Ok(hostname)
+}

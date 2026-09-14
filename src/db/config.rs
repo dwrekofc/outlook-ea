@@ -3,7 +3,7 @@ use anyhow::{Context, Result};
 use std::{fs, path::PathBuf};
 
 impl VaultSettings {
-    pub(super) fn load() -> Result<Self> {
+    pub(crate) fn load() -> Result<Self> {
         Self::load_from(&config_path()?)
     }
 
@@ -34,4 +34,20 @@ fn home_dir() -> Result<PathBuf> {
         .filter(|home| !home.is_empty())
         .map(PathBuf::from)
         .context("HOME is not set; cannot determine Vault configuration directory")
+}
+
+impl VaultSettings {
+    pub(crate) fn mea_dump_path(&self) -> Result<PathBuf> {
+        let notes = self
+            .notes_path
+            .clone()
+            .map(Ok)
+            .unwrap_or_else(|| Ok::<_, anyhow::Error>(home_dir()?.join("vault")))?;
+        let notes = if notes.starts_with("~") {
+            home_dir()?.join(notes.strip_prefix("~")?)
+        } else {
+            notes
+        };
+        Ok(notes.join("utilities/context-profiles/mea/MEA_GRAPH_CONTEXT.md"))
+    }
 }

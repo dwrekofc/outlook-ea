@@ -82,9 +82,10 @@ pub fn cache_body(
     to: &[String],
     cc: &[String],
 ) -> BodyResult<()> {
-    let identity_id = db::ensure_identity(store, rowid, message_id)?;
-    store.execute(
-        "INSERT INTO mail_bodies
+    store.transaction(|store| {
+        let identity_id = db::ensure_identity(store, rowid, message_id)?;
+        store.execute(
+            "INSERT INTO mail_bodies
             (identity_id, body_text, body_format, cached_at, cached_to, cached_cc)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6)
          ON CONFLICT(identity_id) DO UPDATE SET
@@ -93,16 +94,17 @@ pub fn cache_body(
             cached_at = excluded.cached_at,
             cached_to = excluded.cached_to,
             cached_cc = excluded.cached_cc",
-        params![
-            identity_id,
-            body_text,
-            body_format,
-            Utc::now().to_rfc3339(),
-            serialize_list(to),
-            serialize_list(cc)
-        ],
-    )?;
-    Ok(())
+            params![
+                identity_id,
+                body_text,
+                body_format,
+                Utc::now().to_rfc3339(),
+                serialize_list(to),
+                serialize_list(cc)
+            ],
+        )?;
+        Ok(())
+    })
 }
 
 pub fn parse_email_body(raw: &[u8]) -> BodyResult<(String, String)> {

@@ -53,12 +53,12 @@ fn identities_preserve_aliases_across_rowid_reuse() {
     assert_eq!(ensure_identity(&store, 77, "old@test").unwrap(), old);
     let alias = store
         .one(
-            "SELECT identity_id FROM mail_identity_sources WHERE source_id=42",
+            "SELECT identity_id FROM mail_machine_identity_sources WHERE source_id=42",
             (),
             |r| Ok(r.get::<i64>(0)?),
         )
         .unwrap();
-    assert_eq!(alias, Some(old));
+    assert_eq!(alias, Some(new));
     assert!(ensure_identity(&store, 99, "").is_err());
 }
 
@@ -87,4 +87,31 @@ fn envelope_adapter_is_read_only_and_does_not_create_files() {
 #[test]
 fn remote_requires_token_before_attempting_network() {
     assert!(Store::connect("libsql://unused.invalid", "").is_err());
+}
+
+#[test]
+fn identity_failure_rolls_back_new_identity() {
+    let store = test_store().unwrap();
+    store.execute_batch("CREATE TRIGGER reject_alias BEFORE INSERT ON mail_machine_identity_sources BEGIN SELECT RAISE(ABORT,'injected'); END;").unwrap();
+    assert!(ensure_identity(&store, 1, "fail@test").is_err());
+    assert_eq!(
+        store
+            .one("SELECT count(*) FROM mail_identities", (), |r| Ok(
+                r.get::<i64>(0)?
+            ))
+            .unwrap(),
+        Some(0)
+    );
+}
+
+#[test]
+fn dump_path_uses_configured_notes_root() {
+    let settings = VaultSettings {
+        notes_path: Some("/tmp/custom-notes".into()),
+        ..Default::default()
+    };
+    assert_eq!(
+        settings.mea_dump_path().unwrap(),
+        Path::new("/tmp/custom-notes/utilities/context-profiles/mea/MEA_GRAPH_CONTEXT.md")
+    );
 }

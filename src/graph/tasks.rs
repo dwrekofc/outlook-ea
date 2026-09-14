@@ -27,40 +27,44 @@ pub fn add_task(
     due_date: Option<&str>,
     project_id: Option<i64>,
 ) -> GraphResult<i64> {
-    if let Some(project) = project_id {
-        get_node(store, project)?;
-    }
-    let mut meta = json!({"status": "todo"});
-    if let Some(due) = due_date {
-        meta["due_date"] = Value::String(due.to_string());
-    }
-    let task_id = add_node(
-        store,
-        "task",
-        title,
-        None,
-        description,
-        Some(&meta.to_string()),
-        false,
-    )?;
-    if let Some(project) = project_id {
-        add_edge(store, task_id, project, "belongs_to", None, None)?;
-    }
-    Ok(task_id)
+    store.transaction(|store| {
+        if let Some(project) = project_id {
+            get_node(store, project)?;
+        }
+        let mut meta = json!({"status": "todo"});
+        if let Some(due) = due_date {
+            meta["due_date"] = Value::String(due.to_string());
+        }
+        let task_id = add_node(
+            store,
+            "task",
+            title,
+            None,
+            description,
+            Some(&meta.to_string()),
+            false,
+        )?;
+        if let Some(project) = project_id {
+            add_edge(store, task_id, project, "belongs_to", None, None)?;
+        }
+        Ok(task_id)
+    })
 }
 
 pub fn update_task_status(store: &Store, task_id: i64, status: &str) -> GraphResult<()> {
-    let mut meta: Value = serde_json::from_str(&get_node(store, task_id)?.metadata)?;
-    meta["status"] = Value::String(status.to_string());
-    update_node(
-        store,
-        task_id,
-        None,
-        None,
-        None,
-        Some(&meta.to_string()),
-        None,
-    )
+    store.transaction(|store| {
+        let mut meta: Value = serde_json::from_str(&get_node(store, task_id)?.metadata)?;
+        meta["status"] = Value::String(status.to_string());
+        update_node(
+            store,
+            task_id,
+            None,
+            None,
+            None,
+            Some(&meta.to_string()),
+            None,
+        )
+    })
 }
 
 pub fn list_tasks(
@@ -123,15 +127,11 @@ pub fn dump_context(store: &Store) -> GraphResult<String> {
 
 pub fn auto_dump(store: &Store) -> GraphResult<()> {
     let content = dump_context(store)?;
-    let path = std::env::var("HOME")
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(|_| ".".into())
-        .join(".mea")
-        .join("GRAPH_CONTEXT.md");
+    let path = crate::db::VaultSettings::load()?.mea_dump_path()?;
     if let Some(parent) = path.parent() {
-        let _ = std::fs::create_dir_all(parent);
+        std::fs::create_dir_all(parent).map_err(anyhow::Error::from)?;
     }
-    let _ = std::fs::write(path, content);
+    std::fs::write(path, content).map_err(anyhow::Error::from)?;
     Ok(())
 }
 
@@ -174,6 +174,9 @@ fn append_edges(store: &Store, out: &mut String) -> GraphResult<()> {
         .map(|n| (n.id, n.name))
         .collect::<std::collections::HashMap<_, _>>();
     for edge in edges {
+        if !names.contains_key(&edge.source_id) || !names.contains_key(&edge.target_id) {
+            continue;
+        }
         out.push_str(&relationship_line(&names, &edge));
     }
     out.push('\n');

@@ -25,7 +25,7 @@ Before starting the interview, verify the installation:
 
 ```bash
 which mea          # binary exists
-ls /Users/I852000/vault/utilities/context-profiles/mea/  # vault data dir exists
+ls ${VAULT_NOTES}/utilities/context-profiles/mea/  # vault data dir exists
 mea graph list    # shared vault config and schema are ready
 mea sync 2>&1      # can talk to Mail.app
 ```
@@ -124,7 +124,7 @@ Options:
 - "I want to change some"
 
 If they want changes, ask which labels to rename and update the skill file:
-- Edit `/Users/I852000/vault/utilities/ai-productivity/mail/access.md` — update the label descriptions in the Core Commands section
+- Edit `${VAULT_NOTES}/utilities/ai-productivity/mail/access.md` — update the label descriptions in the Core Commands section
 
 ---
 
@@ -142,7 +142,7 @@ Options:
 Record this preference in PATTERNS.md:
 
 ```bash
-cat >> /Users/I852000/vault/utilities/context-profiles/mea/PATTERNS.md << EOF
+cat >> ${VAULT_NOTES}/utilities/context-profiles/mea/PATTERNS.md << EOF
 
 ## $(date +%Y-%m-%d) — Onboarding
 
@@ -186,7 +186,7 @@ Record their wishlist in PATTERNS.md under a `## Feature Wishlist` section. Thes
    mea graph dump
    ```
 
-2. Read back `/Users/I852000/vault/utilities/context-profiles/mea/GRAPH_CONTEXT.md` and present a summary of what was set up:
+2. Read back `${VAULT_NOTES}/utilities/context-profiles/mea/MEA_GRAPH_CONTEXT.md` and present a summary of what was set up:
    - Number of people, teams, orgs added
    - Number of triage rules created
    - VIP list
@@ -219,3 +219,5 @@ If "Run daily brief" — execute `mea sync` then hand off to the daily brief wor
 Shared context uses one Turso graph, profiles `personal` | `mea`, through
 `vault graph`, `mea graph`, or `pcg`. Use canonical IDs and the shared
 `~/.config/vault/config.json`; vault-cli owns migrations.
+
+`VAULT_NOTES` denotes `notes_path` from `VAULT_CONFIG` (default `~/.config/vault/config.json`), falling back to `~/vault`. Resolve it before running shell examples. MEA owns `MEA_GRAPH_CONTEXT.md`; the scheduled vault graph-dump script owns the separate `GRAPH_CONTEXT.md`.

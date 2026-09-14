@@ -32,11 +32,13 @@ pub fn get_edges(
 }
 
 pub fn remove_edge(store: &Store, edge_id: i64) -> GraphResult<()> {
-    let affected = store.execute("DELETE FROM graph_edges WHERE id = ?1", params![edge_id])?;
-    if affected == 0 {
-        return Err(GraphError::EdgeNotFound(edge_id));
-    }
-    record_history(store, None, "edge_removed", &edge_id.to_string())
+    store.transaction(|store| {
+        let affected = store.execute("DELETE FROM graph_edges WHERE id = ?1", params![edge_id])?;
+        if affected == 0 {
+            return Err(GraphError::EdgeNotFound(edge_id));
+        }
+        record_history(store, None, "edge_removed", &edge_id.to_string())
+    })
 }
 
 pub fn traverse(
@@ -139,28 +141,35 @@ pub fn add_vip(
     description: Option<&str>,
     context: Option<&str>,
 ) -> GraphResult<i64> {
-    let person_id = add_node(store, "person", name, Some(email), description, None, true)?;
-    let rule_meta = json!({"action_type": "label", "action_value": "1"}).to_string();
-    let rule_id = add_node(
-        store,
-        "rule",
-        &format!("VIP: {name}"),
-        None,
-        Some("Auto-generated VIP rule"),
-        Some(&rule_meta),
-        false,
-    )?;
-    add_edge(store, rule_id, person_id, "matches_sender", context, None)?;
-    add_edge(
-        store,
-        rule_id,
-        person_id,
-        "applies_action",
-        Some("label:1"),
-        None,
-    )?;
-    add_edge(store, rule_id, person_id, "protects", None, None)?;
-    Ok(person_id)
+    store.transaction(|store| {
+        let person_id = if let Some(person) = super::context::sender_node(store, email)? {
+            super::update_node(store, person.id, None, None, description, None, Some(true))?;
+            person.id
+        } else {
+            add_node(store, "person", name, Some(email), description, None, true)?
+        };
+        let rule_meta = json!({"action_type": "label", "action_value": "1"}).to_string();
+        let rule_id = add_node(
+            store,
+            "rule",
+            &format!("VIP: {name}"),
+            None,
+            Some("Auto-generated VIP rule"),
+            Some(&rule_meta),
+            false,
+        )?;
+        add_edge(store, rule_id, person_id, "matches_sender", context, None)?;
+        add_edge(
+            store,
+            rule_id,
+            person_id,
+            "applies_action",
+            Some("label:1"),
+            None,
+        )?;
+        add_edge(store, rule_id, person_id, "protects", None, None)?;
+        Ok(person_id)
+    })
 }
 
 pub fn add_rule(
@@ -171,22 +180,24 @@ pub fn add_rule(
     action_type: &str,
     action_value: &str,
 ) -> GraphResult<i64> {
-    let meta = json!({"action_type": action_type, "action_value": action_value}).to_string();
-    let rule_id = add_node(store, "rule", name, None, None, Some(&meta), false)?;
-    let target_id = match match_type {
-        "sender" => person_for_sender(store, match_value)?,
-        "subject" => add_node(store, "topic", match_value, None, None, None, false)?,
-        _ => return Ok(rule_id),
-    };
-    add_edge(
-        store,
-        rule_id,
-        target_id,
-        &format!("matches_{match_type}"),
-        None,
-        None,
-    )?;
-    Ok(rule_id)
+    store.transaction(|store| {
+        let meta = json!({"action_type": action_type, "action_value": action_value}).to_string();
+        let rule_id = add_node(store, "rule", name, None, None, Some(&meta), false)?;
+        let target_id = match match_type {
+            "sender" => person_for_sender(store, match_value)?,
+            "subject" => add_node(store, "topic", match_value, None, None, None, false)?,
+            _ => return Ok(rule_id),
+        };
+        add_edge(
+            store,
+            rule_id,
+            target_id,
+            &format!("matches_{match_type}"),
+            None,
+            None,
+        )?;
+        Ok(rule_id)
+    })
 }
 
 fn raw_edges(store: &Store, node_id: i64, predicate: Option<&str>) -> GraphResult<Vec<Edge>> {

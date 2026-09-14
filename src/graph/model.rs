@@ -26,6 +26,8 @@ pub struct Node {
     pub description: Option<String>,
     pub metadata: String,
     pub is_vip: bool,
+    pub profile: String,
+    pub archived: bool,
     pub created_at: String,
     pub updated_at: String,
 }
