@@ -1,0 +1,50 @@
+# Context Graph
+
+> **Unified 2026-09-14 (D15).** Personal and MEA context share one Turso graph.
+> Reads span both profiles. New MEA nodes use MEA provenance; updates preserve
+> existing provenance. Use canonical IDs from `mea graph list/find` or
+> `vault graph nodes --json` for links and task/project references. Old IDs are
+> import provenance only.
+
+
+One graph has profiles `personal` | `mea`; entry points are `vault graph`,
+`mea graph`, and `pcg`. PCG creates personal nodes/history; updates retain
+existing provenance. Configuration is `~/.config/vault/config.json`.
+One person has one node, including work/personal email aliases (D16).
+
+Use this as the guide for MEA's mail rules and the sender/subject matchers behind them.
+
+## Source Of Truth
+
+- Shared graph: the unified vault Turso database (`graph_*` and `mail_*`)
+- Markdown dump: `${VAULT_NOTES}/utilities/context-profiles/mea/MEA_GRAPH_CONTEXT.md`
+- Learned preferences: `${VAULT_NOTES}/utilities/context-profiles/mea/PATTERNS.md`
+
+## Graph Commands
+
+```bash
+mea graph list [--type <type>] [--vip]
+mea graph find "<query>"
+mea graph show <id>
+mea graph edges <id> [--predicate <pred>]
+mea graph traverse <id> [--predicate <pred>] [--depth <n>]
+mea graph add --type <person|team|org|project|topic|vendor|rule|action|task> --name "..." [--email "..."] [--description "..."] [--vip]
+mea graph add-vip --email "..." --name "..." [--description "..."] [--context "..."]
+mea graph link --from <id> --to <id> --predicate <pred> [--context "..."]
+mea graph dump
+```
+
+## Update Rules
+
+- Add context to the graph when it affects prioritization, triage, delegation, task ownership, or project understanding.
+- Use Markdown notes for rich narrative/context; use graph nodes/edges for operational facts agents must reuse.
+- Run `mea graph dump` after any graph mutation.
+- Do not store durable context only in chat, a skill file, or a one-off note.
+
+PCG resolves legacy personal IDs with `personal:<old-id>`; bare numeric IDs are
+canonical Turso IDs. Re-resolve stored references before reusing old commands.
+
+Gmail exception (approved 2026-09-14): PCG still reads `~/.gmail/gmail.db`
+read-only for email dates and reconciliation. D18 moves that cache later.
+
+`VAULT_NOTES` denotes `notes_path` from `VAULT_CONFIG` (default `~/.config/vault/config.json`), falling back to `~/vault`. Resolve it before running shell examples. MEA owns `MEA_GRAPH_CONTEXT.md`; the scheduled vault graph-dump script owns the separate `GRAPH_CONTEXT.md`.

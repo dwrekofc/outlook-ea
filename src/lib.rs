@@ -1,4 +1,5 @@
 pub mod actions;
+pub mod app;
 pub mod body;
 pub mod cli;
 pub mod data;

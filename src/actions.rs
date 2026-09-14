@@ -1,4 +1,5 @@
 use serde::Serialize;
+#[cfg(not(test))]
 use std::process::Command;
 use thiserror::Error;
 
@@ -25,6 +26,7 @@ pub struct ActionResponse {
 }
 
 /// Run an AppleScript command via osascript.
+#[cfg(not(test))]
 fn run_applescript(script: &str) -> ActionResult<String> {
     let output = Command::new("osascript")
         .args(["-e", script])
@@ -167,6 +169,13 @@ pub fn bulk_action(
         success: true,
         message,
     })
+}
+
+#[cfg(test)]
+fn run_applescript(_script: &str) -> ActionResult<String> {
+    Err(ActionError::AppleScript(
+        "Mail adapter disabled in unit tests".into(),
+    ))
 }
 
 #[cfg(test)]

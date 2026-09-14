@@ -25,13 +25,14 @@ Before starting the interview, verify the installation:
 
 ```bash
 which mea          # binary exists
-ls ~/.mea/          # data dir exists
+ls ${VAULT_NOTES}/utilities/context-profiles/mea/  # vault data dir exists
+mea graph list    # shared vault config and schema are ready
 mea sync 2>&1      # can talk to Mail.app
 ```
 
 If anything fails, help the user fix it before proceeding. Refer them to QUICKSTART.md for setup steps.
 
-If `mea sync` succeeds, continue. The database is now initialized.
+Continue when both commands succeed. Vault must already be configured in `~/.config/vault/config.json` (or `VAULT_CONFIG`) with `database_url` and `auth_token`, and schema migration 003 applied. MEA does not initialize the shared database.
 
 ---
 
@@ -123,7 +124,7 @@ Options:
 - "I want to change some"
 
 If they want changes, ask which labels to rename and update the skill file:
-- Edit `~/.claude/skills/mea/SKILL.md` — update the label descriptions in the Actions section
+- Edit `${VAULT_NOTES}/utilities/ai-productivity/mail/access.md` — update the label descriptions in the Core Commands section
 
 ---
 
@@ -141,7 +142,7 @@ Options:
 Record this preference in PATTERNS.md:
 
 ```bash
-cat >> ~/.claude/skills/mea/PATTERNS.md << EOF
+cat >> ${VAULT_NOTES}/utilities/context-profiles/mea/PATTERNS.md << EOF
 
 ## $(date +%Y-%m-%d) — Onboarding
 
@@ -185,7 +186,7 @@ Record their wishlist in PATTERNS.md under a `## Feature Wishlist` section. Thes
    mea graph dump
    ```
 
-2. Read back `~/.mea/GRAPH_CONTEXT.md` and present a summary of what was set up:
+2. Read back `${VAULT_NOTES}/utilities/context-profiles/mea/MEA_GRAPH_CONTEXT.md` and present a summary of what was set up:
    - Number of people, teams, orgs added
    - Number of triage rules created
    - VIP list
@@ -214,3 +215,9 @@ If "Run daily brief" — execute `mea sync` then hand off to the daily brief wor
 - Always confirm before creating rules that auto-trash (destructive)
 - Show what you're doing — after each `mea graph add` or `mea graph add-rule`, briefly confirm what was created
 - If the user describes a workflow that doesn't exist in the CLI, note it as a feature request rather than pretending it works
+
+Shared context uses one Turso graph, profiles `personal` | `mea`, through
+`vault graph`, `mea graph`, or `pcg`. Use canonical IDs and the shared
+`~/.config/vault/config.json`; vault-cli owns migrations.
+
+`VAULT_NOTES` denotes `notes_path` from `VAULT_CONFIG` (default `~/.config/vault/config.json`), falling back to `~/vault`. Resolve it before running shell examples. MEA owns `MEA_GRAPH_CONTEXT.md`; the scheduled vault graph-dump script owns the separate `GRAPH_CONTEXT.md`.

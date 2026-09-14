@@ -99,6 +99,31 @@ pub fn is_vip(config: &RulesConfig, sender_address: &str) -> bool {
         .any(|vip| sender_address.eq_ignore_ascii_case(&vip.address))
 }
 
+/// Subject prefixes for auto-generated calendar status notices (meeting
+/// response / cancellation notifications). These are system-generated noise
+/// even when "from" a VIP, so they are exempt from VIP delete/archive
+/// protection — the human correspondence a VIP guard exists to protect is
+/// never one of these.
+const CALENDAR_NOTICE_PREFIXES: &[&str] = &[
+    "accepted:",
+    "declined:",
+    "tentative:",
+    "tentatively accepted:",
+    "canceled:",
+    "cancelled:",
+];
+
+/// Returns true if the subject is an auto-generated calendar status notice
+/// (e.g. "Declined: Features Sync"). Matching is case-insensitive and ignores
+/// leading whitespace. Such messages may be safely actioned even when the
+/// sender is a VIP.
+pub fn is_calendar_notice_subject(subject: &str) -> bool {
+    let s = subject.trim_start().to_ascii_lowercase();
+    CALENDAR_NOTICE_PREFIXES
+        .iter()
+        .any(|prefix| s.starts_with(prefix))
+}
+
 /// Evaluate a single email against the rules config.
 /// Returns the first matching rule's action, or None if no rule matches.
 /// VIP senders always match with a "label 1" (Follow Up) action first.
@@ -107,8 +132,10 @@ pub fn evaluate_rules(
     sender_address: &str,
     subject: &str,
 ) -> Option<(String, Action)> {
-    // VIP check first — highest priority
-    if is_vip(config, sender_address) {
+    // VIP check first — highest priority. But auto-generated calendar status
+    // notices (e.g. "Canceled: ...") are noise even from a VIP, so they are not
+    // promoted to Follow Up; they fall through to normal rules instead.
+    if is_vip(config, sender_address) && !is_calendar_notice_subject(subject) {
         return Some((
             "VIP Sender".to_string(),
             Action {
@@ -242,6 +269,22 @@ mod tests {
     }
 
     #[test]
+    fn test_calendar_notice_subject() {
+        // Auto-generated calendar status notices are recognized regardless of case/whitespace.
+        assert!(is_calendar_notice_subject("Declined: Features Sync"));
+        assert!(is_calendar_notice_subject("declined: features sync"));
+        assert!(is_calendar_notice_subject("  Accepted: 1:1"));
+        assert!(is_calendar_notice_subject("Tentative: Standup"));
+        assert!(is_calendar_notice_subject("Tentatively Accepted: Standup"));
+        assert!(is_calendar_notice_subject("Canceled: Review"));
+        assert!(is_calendar_notice_subject("Cancelled: Review"));
+        // Real correspondence is not a calendar notice.
+        assert!(!is_calendar_notice_subject("Re: Features Sync"));
+        assert!(!is_calendar_notice_subject("Declining the offer"));
+        assert!(!is_calendar_notice_subject("FW: Accepted payment terms"));
+    }
+
+    #[test]
     fn test_receipt_rule() {
         let config = sample_config();
         let result = evaluate_rules(&config, "store@shop.com", "Your receipt from Shop");
@@ -297,6 +340,20 @@ mod tests {
         // VIP sender + receipt subject -> VIP wins
         let result = evaluate_rules(&config, "boss@company.com", "Your receipt");
         assert_eq!(result.unwrap().0, "VIP Sender");
+    }
+
+    #[test]
+    fn test_vip_calendar_notice_not_followup() {
+        let config = sample_config();
+        // VIP sender + calendar status notice -> NOT promoted to Follow Up.
+        let result = evaluate_rules(&config, "boss@company.com", "Canceled: Weekly Sync");
+        assert!(
+            result.is_none() || result.unwrap().0 != "VIP Sender",
+            "VIP calendar notice must not become a Follow Up"
+        );
+        // Real VIP correspondence is still Follow Up.
+        let real = evaluate_rules(&config, "boss@company.com", "Re: Weekly Sync");
+        assert_eq!(real.unwrap().0, "VIP Sender");
     }
 
     #[test]

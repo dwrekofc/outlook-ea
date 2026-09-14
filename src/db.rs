@@ -1,277 +1,231 @@
-use rusqlite::Connection;
-use std::path::{Path, PathBuf};
-use thiserror::Error;
+use std::{path::Path, rc::Rc};
 
-#[derive(Error, Debug)]
-pub enum DbError {
-    #[error("SQLite error: {0}")]
-    Sqlite(#[from] rusqlite::Error),
-    #[error("IO error: {0}")]
-    Io(#[from] std::io::Error),
-}
+use anyhow::{Context, Result, bail};
+use libsql::{Connection, Database, params};
+mod config;
+mod connection;
+use serde::{Deserialize, Serialize};
+use tokio::runtime::{Builder as RuntimeBuilder, Runtime};
 
+const REQUIRED_SCHEMA_VERSION: i64 = 4;
+
+pub type DbError = anyhow::Error;
 pub type DbResult<T> = Result<T, DbError>;
 
-/// Open (or create) the overlay database at the given path and run migrations.
-pub fn open_overlay_db(path: &Path) -> DbResult<Connection> {
-    let conn = Connection::open(path)?;
-    conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON;")?;
-    migrate(&conn)?;
-    Ok(conn)
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+pub struct VaultSettings {
+    pub database_url: Option<String>,
+    pub auth_token: Option<String>,
+    pub notes_path: Option<std::path::PathBuf>,
 }
 
-/// Open an in-memory overlay database (for testing).
-pub fn open_overlay_db_memory() -> DbResult<Connection> {
-    let conn = Connection::open_in_memory()?;
-    conn.execute_batch("PRAGMA foreign_keys=ON;")?;
-    migrate(&conn)?;
-    Ok(conn)
+pub struct Store {
+    _database: Rc<Database>,
+    connection: Connection,
+    runtime: Rc<Runtime>,
+    in_transaction: bool,
 }
 
-/// Return the default overlay DB path: ~/.mea/overlay.db
-pub fn default_overlay_path() -> PathBuf {
-    let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
-    PathBuf::from(home).join(".mea").join("overlay.db")
-}
-
-fn migrate(conn: &Connection) -> DbResult<()> {
-    conn.execute_batch(
-        "CREATE TABLE IF NOT EXISTS schema_version (
-            version INTEGER NOT NULL
-        );",
-    )?;
-
-    let version: i32 = conn.query_row(
-        "SELECT COALESCE(MAX(version), 0) FROM schema_version",
-        [],
-        |r| r.get(0),
-    )?;
-
-    if version < 1 {
-        conn.execute_batch(
-            "CREATE TABLE IF NOT EXISTS email_identity (
-                rowid INTEGER PRIMARY KEY,
-                message_id TEXT NOT NULL
-            );
-
-            CREATE INDEX IF NOT EXISTS idx_email_identity_message_id
-                ON email_identity(message_id);
-
-            CREATE TABLE IF NOT EXISTS labels (
-                rowid INTEGER PRIMARY KEY REFERENCES email_identity(rowid),
-                label_number INTEGER NOT NULL CHECK(label_number BETWEEN 1 AND 5),
-                assigned_at TEXT NOT NULL
-            );
-
-            CREATE TABLE IF NOT EXISTS cached_bodies (
-                rowid INTEGER PRIMARY KEY REFERENCES email_identity(rowid),
-                body_text TEXT NOT NULL,
-                body_format TEXT NOT NULL CHECK(body_format IN ('plain', 'markdown')),
-                cached_at TEXT NOT NULL
-            );
-
-            INSERT INTO schema_version (version) VALUES (1);",
-        )?;
+impl Store {
+    pub fn open_in_memory() -> DbResult<Self> {
+        Self::connect(":memory:", "")
     }
 
-    if version < 2 {
-        conn.execute_batch(
-            "ALTER TABLE cached_bodies ADD COLUMN cached_to TEXT NOT NULL DEFAULT '';
-             ALTER TABLE cached_bodies ADD COLUMN cached_cc TEXT NOT NULL DEFAULT '';
-             INSERT INTO schema_version (version) VALUES (2);",
-        )?;
+    pub fn open_from_vault_config() -> DbResult<Self> {
+        let settings = VaultSettings::load()?;
+        let url = settings
+            .database_url
+            .as_deref()
+            .filter(|value| !value.trim().is_empty())
+            .context("Vault database_url is missing")?;
+        let token = settings.auth_token.as_deref().unwrap_or("");
+        let store = Self::connect(url, token)?;
+        store.require_schema()?;
+        Ok(store)
     }
 
-    if version < 3 {
-        conn.execute_batch(
-            "CREATE TABLE IF NOT EXISTS nodes (
-                id          INTEGER PRIMARY KEY AUTOINCREMENT,
-                node_type   TEXT NOT NULL,
-                name        TEXT NOT NULL,
-                email       TEXT,
-                description TEXT,
-                metadata    TEXT DEFAULT '{}',
-                is_vip      INTEGER DEFAULT 0,
-                created_at  TEXT NOT NULL,
-                updated_at  TEXT NOT NULL
-            );
-            CREATE UNIQUE INDEX IF NOT EXISTS idx_nodes_email ON nodes(email) WHERE email IS NOT NULL;
-            CREATE INDEX IF NOT EXISTS idx_nodes_type ON nodes(node_type);
-
-            CREATE TABLE IF NOT EXISTS edges (
-                id          INTEGER PRIMARY KEY AUTOINCREMENT,
-                source_id   INTEGER NOT NULL REFERENCES nodes(id) ON DELETE CASCADE,
-                target_id   INTEGER NOT NULL REFERENCES nodes(id) ON DELETE CASCADE,
-                predicate   TEXT NOT NULL,
-                context     TEXT,
-                weight      REAL DEFAULT 1.0,
-                created_at  TEXT NOT NULL
-            );
-            CREATE INDEX IF NOT EXISTS idx_edges_source ON edges(source_id);
-            CREATE INDEX IF NOT EXISTS idx_edges_target ON edges(target_id);
-            CREATE INDEX IF NOT EXISTS idx_edges_predicate ON edges(predicate);
-            CREATE UNIQUE INDEX IF NOT EXISTS idx_edges_unique ON edges(source_id, target_id, predicate);
-
-            INSERT INTO schema_version (version) VALUES (3);",
-        )?;
+    pub fn connect(url: &str, auth_token: &str) -> DbResult<Self> {
+        let runtime = RuntimeBuilder::new_current_thread().enable_all().build()?;
+        let (database, connection) = runtime.block_on(connection::open(url, auth_token))?;
+        Ok(Self {
+            _database: Rc::new(database),
+            connection,
+            runtime: Rc::new(runtime),
+            in_transaction: false,
+        })
     }
 
-    Ok(())
-}
+    pub fn open_read_only(path: &Path) -> DbResult<Self> {
+        let runtime = RuntimeBuilder::new_current_thread().enable_all().build()?;
+        let (database, connection) = runtime.block_on(connection::read_only(path))?;
+        Ok(Self {
+            _database: Rc::new(database),
+            connection,
+            runtime: Rc::new(runtime),
+            in_transaction: false,
+        })
+    }
 
-/// Ensure an email identity mapping exists. Upserts the message_id for a given rowid.
-pub fn ensure_identity(conn: &Connection, rowid: i64, message_id: &str) -> DbResult<()> {
-    conn.execute(
-        "INSERT INTO email_identity (rowid, message_id) VALUES (?1, ?2)
-         ON CONFLICT(rowid) DO UPDATE SET message_id = excluded.message_id",
-        rusqlite::params![rowid, message_id],
-    )?;
-    Ok(())
-}
+    /// Nested graph helpers share the outer immediate transaction and its connection.
+    /// D17: read-modify-write operations must stay inside this boundary on replicas too.
+    pub fn transaction<T, E>(&self, apply: impl FnOnce(&Store) -> Result<T, E>) -> Result<T, E>
+    where
+        E: From<anyhow::Error>,
+    {
+        if self.in_transaction {
+            return apply(self);
+        }
+        let tx = self
+            .runtime
+            .block_on(
+                self.connection
+                    .transaction_with_behavior(libsql::TransactionBehavior::Immediate),
+            )
+            .map_err(anyhow::Error::from)?;
+        let scoped = Store {
+            _database: Rc::clone(&self._database),
+            connection: (*tx).clone(),
+            runtime: Rc::clone(&self.runtime),
+            in_transaction: true,
+        };
+        match apply(&scoped) {
+            Ok(value) => {
+                self.runtime
+                    .block_on(tx.commit())
+                    .map_err(anyhow::Error::from)?;
+                Ok(value)
+            }
+            Err(error) => {
+                self.runtime
+                    .block_on(tx.rollback())
+                    .map_err(anyhow::Error::from)?;
+                Err(error)
+            }
+        }
+    }
 
-/// Look up a rowid by message_id (for re-mapping after index rebuilds).
-pub fn find_rowid_by_message_id(conn: &Connection, message_id: &str) -> DbResult<Option<i64>> {
-    let mut stmt = conn.prepare("SELECT rowid FROM email_identity WHERE message_id = ?1")?;
-    let result = stmt.query_row([message_id], |r| r.get(0)).ok();
-    Ok(result)
+    pub fn execute(&self, sql: &str, params: impl libsql::params::IntoParams) -> DbResult<u64> {
+        self.runtime
+            .block_on(self.connection.execute(sql, params))
+            .with_context(|| format!("database execute failed: {sql}"))
+    }
+
+    pub fn execute_batch(&self, sql: &str) -> DbResult<()> {
+        self.runtime
+            .block_on(self.connection.execute_batch(sql))
+            .with_context(|| "database batch failed")?;
+        Ok(())
+    }
+
+    pub fn one<T>(
+        &self,
+        sql: &str,
+        params: impl libsql::params::IntoParams,
+        map: impl FnOnce(&libsql::Row) -> Result<T>,
+    ) -> DbResult<Option<T>> {
+        let mut rows = self
+            .runtime
+            .block_on(self.connection.query(sql, params))
+            .with_context(|| format!("database query failed: {sql}"))?;
+        let row = self.runtime.block_on(rows.next())?;
+        row.map(|value| map(&value)).transpose()
+    }
+
+    pub fn all<T>(
+        &self,
+        sql: &str,
+        params: impl libsql::params::IntoParams,
+        mut map: impl FnMut(&libsql::Row) -> Result<T>,
+    ) -> DbResult<Vec<T>> {
+        let mut rows = self
+            .runtime
+            .block_on(self.connection.query(sql, params))
+            .with_context(|| format!("database query failed: {sql}"))?;
+        let mut result = Vec::new();
+        while let Some(row) = self.runtime.block_on(rows.next())? {
+            result.push(map(&row)?);
+        }
+        Ok(result)
+    }
+
+    fn require_schema(&self) -> DbResult<()> {
+        let version = self
+            .one(
+                "SELECT COALESCE(MAX(version), 0) FROM schema_migrations",
+                (),
+                |row| Ok(row.get::<i64>(0)?),
+            )?
+            .unwrap_or(0);
+        if version < REQUIRED_SCHEMA_VERSION {
+            bail!("Vault database schema must be at version 4 or newer; run vault init/migrations");
+        }
+        self.one("SELECT 1 FROM graph_nodes LIMIT 0", (), |_| Ok(()))?;
+        self.one("SELECT 1 FROM mail_identities LIMIT 0", (), |_| Ok(()))?;
+        Ok(())
+    }
+
+    #[cfg(test)]
+    pub fn install_test_schema(&self) -> DbResult<()> {
+        // Copied from vault-cli migrations/003_graph_mail.sql as the test fixture.
+        self.execute_batch("CREATE TABLE IF NOT EXISTS schema_migrations (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL);")?;
+        self.execute_batch(include_str!("db/schema_fixture.sql"))?;
+        self.execute_batch(include_str!("db/machine_sources_fixture.sql"))?;
+        Ok(())
+    }
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
+pub fn test_store() -> DbResult<Store> {
+    let store = Store::connect(":memory:", "")?;
+    store.install_test_schema()?;
+    Ok(store)
+}
 
-    #[test]
-    fn test_create_overlay_db() {
-        let conn = open_overlay_db_memory().unwrap();
-        let version: i32 = conn
-            .query_row("SELECT MAX(version) FROM schema_version", [], |r| r.get(0))
-            .unwrap();
-        assert_eq!(version, 3);
+pub fn ensure_identity(store: &Store, source_id: i64, message_id: &str) -> DbResult<i64> {
+    store.transaction(|store| {
+    if message_id.trim().is_empty() {
+        bail!("message_id is required for mail identity storage");
     }
-
-    #[test]
-    fn test_migration_idempotent() {
-        let conn = open_overlay_db_memory().unwrap();
-        // Running migrate again should not fail
-        migrate(&conn).unwrap();
-        let version: i32 = conn
-            .query_row("SELECT MAX(version) FROM schema_version", [], |r| r.get(0))
-            .unwrap();
-        assert_eq!(version, 3);
+    store.execute(
+        "INSERT INTO mail_identities (message_id) VALUES (?1)
+         ON CONFLICT(message_id) DO NOTHING",
+        params![message_id],
+    )?;
+    let identity_id = store
+        .one(
+            "SELECT id FROM mail_identities WHERE message_id = ?1",
+            params![message_id],
+            |row| Ok(row.get::<i64>(0)?),
+        )?
+        .context("mail identity was not created")?;
+    let machine_id = machine_id()?;
+    let previous = store.one(
+        "SELECT identity_id FROM mail_machine_identity_sources WHERE machine_id=?1 AND source_id=?2",
+        params![machine_id.clone(), source_id], |r| Ok(r.get::<i64>(0)?),
+    )?;
+    store.execute(
+        "INSERT INTO mail_machine_identity_sources(machine_id,source_id,identity_id) VALUES (?1,?2,?3)
+         ON CONFLICT(machine_id,source_id) DO UPDATE SET identity_id=excluded.identity_id",
+        params![machine_id, source_id, identity_id],
+    )?;
+    if previous.is_some_and(|old| old != identity_id) {
+        eprintln!("warning: Apple Mail rowid {source_id} was reassigned on this machine");
     }
+    Ok(identity_id)
+    })
+}
 
-    #[test]
-    fn test_ensure_identity() {
-        let conn = open_overlay_db_memory().unwrap();
-        ensure_identity(&conn, 42, "abc@example.com").unwrap();
-        let mid: String = conn
-            .query_row(
-                "SELECT message_id FROM email_identity WHERE rowid = 42",
-                [],
-                |r| r.get(0),
-            )
-            .unwrap();
-        assert_eq!(mid, "abc@example.com");
-    }
+#[cfg(test)]
+mod regression_tests;
 
-    #[test]
-    fn test_ensure_identity_upsert() {
-        let conn = open_overlay_db_memory().unwrap();
-        ensure_identity(&conn, 42, "old@example.com").unwrap();
-        ensure_identity(&conn, 42, "new@example.com").unwrap();
-        let mid: String = conn
-            .query_row(
-                "SELECT message_id FROM email_identity WHERE rowid = 42",
-                [],
-                |r| r.get(0),
-            )
-            .unwrap();
-        assert_eq!(mid, "new@example.com");
-    }
-
-    #[test]
-    fn test_find_rowid_by_message_id() {
-        let conn = open_overlay_db_memory().unwrap();
-        ensure_identity(&conn, 99, "test@example.com").unwrap();
-        assert_eq!(
-            find_rowid_by_message_id(&conn, "test@example.com").unwrap(),
-            Some(99)
-        );
-        assert_eq!(
-            find_rowid_by_message_id(&conn, "nonexistent@example.com").unwrap(),
-            None
-        );
-    }
-
-    #[test]
-    fn test_tables_exist() {
-        let conn = open_overlay_db_memory().unwrap();
-        // Verify all expected tables exist by querying them
-        conn.execute_batch(
-            "SELECT * FROM email_identity LIMIT 0;
-             SELECT * FROM labels LIMIT 0;
-             SELECT * FROM cached_bodies LIMIT 0;
-             SELECT * FROM schema_version LIMIT 0;
-             SELECT * FROM nodes LIMIT 0;
-             SELECT * FROM edges LIMIT 0;",
-        )
-        .unwrap();
-    }
-
-    #[test]
-    fn test_migration_v3_creates_nodes_edges() {
-        let conn = open_overlay_db_memory().unwrap();
-        // Verify the nodes and edges tables exist by querying them
-        conn.execute_batch(
-            "SELECT * FROM nodes LIMIT 0;
-             SELECT * FROM edges LIMIT 0;",
-        )
-        .unwrap();
-    }
-
-    #[test]
-    fn test_migration_v2_adds_cached_to_cc() {
-        let conn = open_overlay_db_memory().unwrap();
-        // Verify the cached_to and cached_cc columns exist by inserting into them
-        ensure_identity(&conn, 1, "test@msg").unwrap();
-        conn.execute(
-            "INSERT INTO cached_bodies (rowid, body_text, body_format, cached_at, cached_to, cached_cc) VALUES (1, 'body', 'plain', '2024-01-01', '[\"a@b\"]', '[]')",
-            [],
-        )
-        .unwrap();
-        let (to, cc): (String, String) = conn
-            .query_row(
-                "SELECT cached_to, cached_cc FROM cached_bodies WHERE rowid = 1",
-                [],
-                |r| Ok((r.get(0)?, r.get(1)?)),
-            )
-            .unwrap();
-        assert_eq!(to, "[\"a@b\"]");
-        assert_eq!(cc, "[]");
-    }
-
-    #[test]
-    fn test_persistent_db() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("test.db");
-
-        // Create and insert
-        {
-            let conn = open_overlay_db(&path).unwrap();
-            ensure_identity(&conn, 1, "persist@test.com").unwrap();
-        }
-
-        // Reopen and verify
-        {
-            let conn = open_overlay_db(&path).unwrap();
-            let mid: String = conn
-                .query_row(
-                    "SELECT message_id FROM email_identity WHERE rowid = 1",
-                    [],
-                    |r| r.get(0),
-                )
-                .unwrap();
-            assert_eq!(mid, "persist@test.com");
-        }
-    }
+pub(crate) fn machine_id() -> DbResult<String> {
+    let output = std::process::Command::new("hostname")
+        .output()
+        .context("cannot determine machine hostname for mail aliases")?;
+    let hostname = String::from_utf8(output.stdout)?.trim().to_owned();
+    anyhow::ensure!(
+        output.status.success() && !hostname.is_empty(),
+        "machine hostname is missing"
+    );
+    Ok(hostname)
 }
