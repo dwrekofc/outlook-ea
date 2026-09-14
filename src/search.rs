@@ -114,7 +114,9 @@ pub fn search_metadata(
             date: unix_to_iso8601(date_sent),
             is_read: read != 0,
             folder: folder_from_url(&folder_url),
+            conversation_id: None,
             label: None,
+            needs_reply: None,
             sender_context: None,
         })
     })?;
@@ -231,7 +233,9 @@ pub fn search_emails(
                         date: unix_to_iso8601(date_sent),
                         is_read: read != 0,
                         folder: folder_from_url(&folder_url),
+                        conversation_id: None,
                         label: None,
+                        needs_reply: None,
                         sender_context: None,
                     })
                 })?;

@@ -1,6 +1,7 @@
 use chrono::DateTime;
 use rusqlite::Connection;
 use serde::Serialize;
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use thiserror::Error;
 
@@ -28,10 +29,41 @@ pub struct EmailSummary {
     pub date: String,
     pub is_read: bool,
     pub folder: String,
+    /// Apple Mail conversation/thread id linking inbox ↔ sent ↔ archive.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub conversation_id: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub label: Option<u8>,
+    /// Set only when --needs-reply is requested: true when the conversation's
+    /// latest message is inbound AND the user is a direct (To) recipient.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub needs_reply: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub sender_context: Option<graph::SenderContext>,
+}
+
+/// One message in a conversation thread, with send direction.
+#[derive(Debug, Clone, Serialize)]
+pub struct ThreadMessage {
+    pub id: i64,
+    pub date: String,
+    pub from: String,
+    pub subject: String,
+    pub folder: String,
+    /// "out" if sent by the user (Sent folder or self-address), else "in".
+    pub direction: String,
+    pub is_read: bool,
+}
+
+/// A full conversation thread plus a derived status line.
+#[derive(Debug, Clone, Serialize)]
+pub struct ThreadResponse {
+    pub conversation_id: i64,
+    pub message_count: usize,
+    pub sent_count: usize,
+    /// "awaiting_your_reply" | "you_replied_last" | "no_reply_needed"
+    pub status: String,
+    pub messages: Vec<ThreadMessage>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -149,7 +181,8 @@ pub fn list_emails(
                 COALESCE(m.subject_prefix, '') || COALESCE(sub.subject, '') as subject,
                 COALESCE(m.date_sent, 0) as date_sent,
                 COALESCE(m.read, 0) as is_read,
-                COALESCE(mb.url, '') as folder_url
+                COALESCE(mb.url, '') as folder_url,
+                COALESCE(m.conversation_id, 0) as conversation_id
          FROM messages m
          JOIN subjects sub ON m.subject = sub.ROWID
          JOIN addresses a ON m.sender = a.ROWID
@@ -176,6 +209,7 @@ pub fn list_emails(
         let date_sent: i64 = row.get(5)?;
         let read: i32 = row.get(6)?;
         let folder_url: String = row.get(7)?;
+        let conversation_id: i64 = row.get(8)?;
 
         Ok(EmailSummary {
             id: rowid,
@@ -186,7 +220,13 @@ pub fn list_emails(
             date: unix_to_iso8601(date_sent),
             is_read: read != 0,
             folder: folder_from_url(&folder_url),
+            conversation_id: if conversation_id != 0 {
+                Some(conversation_id)
+            } else {
+                None
+            },
             label: None,
+            needs_reply: None,
             sender_context: None,
         })
     })?;
@@ -214,8 +254,9 @@ pub fn list_emails_filtered(
     page_size: usize,
     label_filter: Option<u8>,
     untriaged: bool,
+    needs_reply: bool,
 ) -> DataResult<ListResponse> {
-    let needs_label_filter = label_filter.is_some() || untriaged;
+    let needs_label_filter = label_filter.is_some() || untriaged || needs_reply;
 
     // When filtering by label/untriaged, fetch all emails (no SQL pagination)
     // so we can filter correctly before paginating
@@ -249,6 +290,21 @@ pub fn list_emails_filtered(
             result.emails.retain(|e| e.label.is_none());
         }
 
+        // Apply needs-reply filter: annotate then retain only those awaiting a reply.
+        if needs_reply {
+            let self_ids = self_address_ids(envelope_conn);
+            for email in &mut result.emails {
+                let nr = compute_needs_reply(
+                    envelope_conn,
+                    email.id,
+                    email.conversation_id,
+                    &self_ids,
+                );
+                email.needs_reply = Some(nr);
+            }
+            result.emails.retain(|e| e.needs_reply == Some(true));
+        }
+
         // Manual pagination after filtering
         let total_count = result.emails.len();
         let offset = page * page_size;
@@ -268,6 +324,201 @@ pub fn list_emails_filtered(
     } else {
         Ok(result)
     }
+}
+
+/// A mailbox URL is an outgoing (Sent) folder if its path contains "Sent".
+/// Matches both "Sent Items" (Exchange) and "Sent Messages" (IMAP).
+fn is_sent_url(url: &str) -> bool {
+    url.to_lowercase().contains("/sent")
+}
+
+/// Collect the address ROWIDs the user sends *from*, self-identifying with no
+/// hardcoded address. A Sent folder contains stray senders (Exchange stores
+/// conversation copies, on-behalf sends, etc.), so counting by frequency and
+/// keeping only senders ≥1% of the top sender cleanly isolates the account
+/// owner's own address(es) (which dominate Sent) from that noise.
+pub fn self_address_ids(conn: &Connection) -> HashSet<i64> {
+    let mut counts: Vec<(i64, i64)> = Vec::new();
+    if let Ok(mut stmt) = conn.prepare(
+        "SELECT m.sender, COUNT(*) c
+         FROM messages m JOIN mailboxes mb ON m.mailbox = mb.ROWID
+         WHERE mb.url LIKE '%/Sent%' OR mb.url LIKE '%/sent%'
+         GROUP BY m.sender",
+    ) && let Ok(rows) = stmt.query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?)))
+    {
+        counts = rows.flatten().collect();
+    }
+    let max_count = counts.iter().map(|(_, c)| *c).max().unwrap_or(0);
+    // Keep senders that are at least 1% of the top sender (and seen >1 time).
+    let threshold = std::cmp::max(2, max_count / 100);
+    counts
+        .into_iter()
+        .filter(|(_, c)| *c >= threshold)
+        .map(|(id, _)| id)
+        .collect()
+}
+
+/// Look up the conversation_id for a message ROWID (None if 0/missing).
+pub fn conversation_id_for(conn: &Connection, rowid: i64) -> Option<i64> {
+    conn.query_row(
+        "SELECT COALESCE(conversation_id, 0) FROM messages WHERE ROWID = ?1",
+        [rowid],
+        |r| r.get::<_, i64>(0),
+    )
+    .ok()
+    .filter(|&c| c != 0)
+}
+
+/// A sender address that is automated / no-reply (never expects a human reply).
+fn is_automated_sender(addr: &str) -> bool {
+    let a = addr.to_lowercase();
+    let local = a.split('@').next().unwrap_or(&a);
+    const NEEDLES: &[&str] = &[
+        "no-reply",
+        "noreply",
+        "no_reply",
+        "donotreply",
+        "do_not_reply",
+        "do.not.reply",
+        "notification",
+        "notifications",
+        "notify",
+        "mailer",
+        "automated",
+        "auto_",
+        "auto-",
+    ];
+    if NEEDLES.iter().any(|n| local.contains(n)) {
+        return true;
+    }
+    // Common automated/no-reply domains seen in this mailbox.
+    const DOMAINS: &[&str] = &[
+        "sharepointonline.com",
+        "awardco.com",
+        "equateplus.com",
+        "vanguard.com",
+        "airtable.com",
+        "outlook.mail.microsoft",
+        "accounts.google.com",
+    ];
+    DOMAINS.iter().any(|d| a.ends_with(d) || a.contains(d))
+}
+
+/// Determine whether an inbox message awaits the user's reply:
+/// the conversation's latest message is inbound, from a real person (not an
+/// automated/no-reply sender or calendar status notice), AND the user is a
+/// direct (To, type=0) recipient — not merely CC'd.
+pub fn compute_needs_reply(
+    conn: &Connection,
+    rowid: i64,
+    conv_id: Option<i64>,
+    self_ids: &HashSet<i64>,
+) -> bool {
+    // Skip automated senders and calendar status notices — never reply-needed.
+    if let Ok((addr, subject)) = conn.query_row(
+        "SELECT COALESCE(a.address,''), COALESCE(m.subject_prefix,'')||COALESCE(sub.subject,'')
+         FROM messages m
+         LEFT JOIN addresses a ON m.sender = a.ROWID
+         LEFT JOIN subjects sub ON m.subject = sub.ROWID
+         WHERE m.ROWID = ?1",
+        [rowid],
+        |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)),
+    ) && (is_automated_sender(&addr)
+        || crate::rules::is_calendar_notice_subject(&subject)
+        || subject.trim_start().to_ascii_lowercase().starts_with("automatic reply"))
+    {
+        return false;
+    }
+
+    // Must be a direct To recipient (type = 0) — not merely CC'd.
+    let user_in_to = self_ids.iter().any(|&aid| {
+        conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM recipients WHERE message = ?1 AND type = 0 AND address = ?2)",
+            rusqlite::params![rowid, aid],
+            |r| r.get::<_, i64>(0),
+        )
+        .map(|e| e != 0)
+        .unwrap_or(false)
+    });
+    if !user_in_to {
+        return false;
+    }
+
+    // Find the latest message in the conversation; outbound if Sent folder or self sender.
+    let Some(conv) = conv_id else {
+        // No conversation grouping: single inbound message addressed to user.
+        return true;
+    };
+    let latest: Option<(String, i64)> = conn
+        .query_row(
+            "SELECT COALESCE(mb.url,''), m.sender
+             FROM messages m JOIN mailboxes mb ON m.mailbox = mb.ROWID
+             WHERE m.conversation_id = ?1
+             ORDER BY m.date_received DESC LIMIT 1",
+            [conv],
+            |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)),
+        )
+        .ok();
+    match latest {
+        Some((url, sender)) => !(is_sent_url(&url) || self_ids.contains(&sender)),
+        None => true,
+    }
+}
+
+/// Build a full conversation thread (all folders) ordered chronologically.
+pub fn get_thread(conn: &Connection, conversation_id: i64) -> DataResult<ThreadResponse> {
+    let self_ids = self_address_ids(conn);
+    let mut stmt = conn.prepare(
+        "SELECT m.ROWID,
+                COALESCE(m.date_received, m.date_sent, 0),
+                COALESCE(a.comment,'') || ' <' || COALESCE(a.address,'') || '>',
+                COALESCE(m.subject_prefix,'') || COALESCE(sub.subject,''),
+                COALESCE(mb.url,''),
+                COALESCE(m.read,0),
+                m.sender
+         FROM messages m
+         JOIN mailboxes mb ON m.mailbox = mb.ROWID
+         LEFT JOIN subjects sub ON m.subject = sub.ROWID
+         LEFT JOIN addresses a ON m.sender = a.ROWID
+         WHERE m.conversation_id = ?1
+         ORDER BY COALESCE(m.date_received, m.date_sent, 0) ASC",
+    )?;
+    let rows = stmt.query_map([conversation_id], |row| {
+        let id: i64 = row.get(0)?;
+        let ts: i64 = row.get(1)?;
+        let from: String = row.get(2)?;
+        let subject: String = row.get(3)?;
+        let url: String = row.get(4)?;
+        let read: i32 = row.get(5)?;
+        let sender: i64 = row.get(6)?;
+        let outgoing = is_sent_url(&url) || self_ids.contains(&sender);
+        Ok(ThreadMessage {
+            id,
+            date: unix_to_iso8601(ts),
+            from,
+            subject,
+            folder: folder_from_url(&url),
+            direction: if outgoing { "out" } else { "in" }.to_string(),
+            is_read: read != 0,
+        })
+    })?;
+    let messages: Vec<ThreadMessage> = rows.filter_map(|r| r.ok()).collect();
+    let sent_count = messages.iter().filter(|m| m.direction == "out").count();
+    // Pure ball-in-court status from thread structure. Whether a reply is
+    // actually warranted (sender/recipient judgment) is the job of --needs-reply.
+    let status = match messages.last() {
+        Some(m) if m.direction == "out" => "you_replied_last",
+        Some(_) => "awaiting_your_reply",
+        None => "empty",
+    }
+    .to_string();
+    Ok(ThreadResponse {
+        conversation_id,
+        message_count: messages.len(),
+        sent_count,
+        status,
+        messages,
+    })
 }
 
 /// Parse "Name <address>" or bare address formats.
@@ -307,7 +558,8 @@ mod tests {
                 read INTEGER DEFAULT 0,
                 flagged INTEGER DEFAULT 0,
                 deleted INTEGER DEFAULT 0,
-                mailbox INTEGER
+                mailbox INTEGER,
+                conversation_id INTEGER DEFAULT 0
              );
              INSERT INTO mailboxes VALUES (1, 'ews://test-uuid/Inbox');",
         )
@@ -355,7 +607,8 @@ mod tests {
 
         labels::assign_label(&overlay, 3, "msg3@test", 1).unwrap();
 
-        let result = list_emails_filtered(&envelope, &overlay, None, 0, 5, Some(1), false).unwrap();
+        let result =
+            list_emails_filtered(&envelope, &overlay, None, 0, 5, Some(1), false, false).unwrap();
         assert_eq!(result.total_count, 1);
         assert_eq!(result.emails.len(), 1);
         assert_eq!(result.emails[0].id, 3);
@@ -369,11 +622,13 @@ mod tests {
         labels::assign_label(&overlay, 5, "msg5@test", 1).unwrap();
         labels::assign_label(&overlay, 3, "msg3@test", 2).unwrap();
 
-        let page0 = list_emails_filtered(&envelope, &overlay, None, 0, 2, None, true).unwrap();
+        let page0 =
+            list_emails_filtered(&envelope, &overlay, None, 0, 2, None, true, false).unwrap();
         assert_eq!(page0.total_count, 3);
         assert_eq!(page0.emails.len(), 2);
 
-        let page1 = list_emails_filtered(&envelope, &overlay, None, 1, 2, None, true).unwrap();
+        let page1 =
+            list_emails_filtered(&envelope, &overlay, None, 1, 2, None, true, false).unwrap();
         assert_eq!(page1.total_count, 3);
         assert_eq!(page1.emails.len(), 1);
     }
@@ -383,9 +638,33 @@ mod tests {
         let envelope = mock_envelope(5);
         let overlay = open_overlay_db_memory().unwrap();
 
-        let result = list_emails_filtered(&envelope, &overlay, None, 0, 3, None, false).unwrap();
+        let result =
+            list_emails_filtered(&envelope, &overlay, None, 0, 3, None, false, false).unwrap();
         assert_eq!(result.total_count, 5);
         assert_eq!(result.emails.len(), 3);
+    }
+
+    #[test]
+    fn test_is_sent_url() {
+        assert!(is_sent_url("ews://uuid/Sent%20Items"));
+        assert!(is_sent_url("ews://uuid/Deleted%20Items/Sent%20Items"));
+        assert!(is_sent_url("imap://acct/Sent Messages"));
+        assert!(!is_sent_url("ews://uuid/Inbox"));
+        assert!(!is_sent_url("ews://uuid/Archive"));
+    }
+
+    #[test]
+    fn test_is_automated_sender() {
+        assert!(is_automated_sender("no-reply@sharepointonline.com"));
+        assert!(is_automated_sender("donotreply_signup@sap.com"));
+        assert!(is_automated_sender("do_not_reply_learning@sap.com"));
+        assert!(is_automated_sender("notification@emoneyadvisor.com"));
+        assert!(is_automated_sender("mailer@workato.com"));
+        assert!(is_automated_sender("someone@equateplus.com"));
+        // Real people are not automated.
+        assert!(!is_automated_sender("jason.cook@sap.com"));
+        assert!(!is_automated_sender("d.skinnell@sap.com"));
+        assert!(!is_automated_sender("benjamin.smokovich@sap.com"));
     }
 
     #[test]
@@ -460,7 +739,7 @@ mod tests {
                 ROWID INTEGER PRIMARY KEY, message_id INTEGER DEFAULT 0, global_message_id INTEGER,
                 subject_prefix TEXT, sender INTEGER, subject INTEGER,
                 date_sent INTEGER, read INTEGER DEFAULT 0, flagged INTEGER DEFAULT 0,
-                deleted INTEGER DEFAULT 0, mailbox INTEGER
+                deleted INTEGER DEFAULT 0, mailbox INTEGER, conversation_id INTEGER DEFAULT 0
              );
              INSERT INTO mailboxes VALUES (1, 'ews://test-uuid/Inbox');
              INSERT INTO mailboxes VALUES (2, 'ews://test-uuid/Sent');
@@ -470,8 +749,8 @@ mod tests {
              INSERT INTO addresses VALUES (2, 'b@t', 'B');
              INSERT INTO message_global_data VALUES (1, 1, 'a@test');
              INSERT INTO message_global_data VALUES (2, 2, 'b@test');
-             INSERT INTO messages VALUES (1, 0, 1, '', 1, 1, 100, 0, 0, 0, 1);
-             INSERT INTO messages VALUES (2, 0, 2, '', 2, 2, 200, 0, 0, 0, 2);",
+             INSERT INTO messages VALUES (1, 0, 1, '', 1, 1, 100, 0, 0, 0, 1, 0);
+             INSERT INTO messages VALUES (2, 0, 2, '', 2, 2, 200, 0, 0, 0, 2, 0);",
         )
         .unwrap();
 
@@ -503,13 +782,13 @@ mod tests {
                 ROWID INTEGER PRIMARY KEY, message_id INTEGER DEFAULT 0, global_message_id INTEGER,
                 subject_prefix TEXT, sender INTEGER, subject INTEGER,
                 date_sent INTEGER, read INTEGER DEFAULT 0, flagged INTEGER DEFAULT 0,
-                deleted INTEGER DEFAULT 0, mailbox INTEGER
+                deleted INTEGER DEFAULT 0, mailbox INTEGER, conversation_id INTEGER DEFAULT 0
              );
              INSERT INTO mailboxes VALUES (1, 'ews://test-uuid/Inbox');
              INSERT INTO subjects VALUES (1, 'Hello');
              INSERT INTO addresses VALUES (1, 'a@t', 'A');
              INSERT INTO message_global_data VALUES (1, 1, 'a@test');
-             INSERT INTO messages VALUES (1, 0, 1, 'Re: ', 1, 1, 100, 0, 0, 0, 1);",
+             INSERT INTO messages VALUES (1, 0, 1, 'Re: ', 1, 1, 100, 0, 0, 0, 1, 0);",
         )
         .unwrap();
 

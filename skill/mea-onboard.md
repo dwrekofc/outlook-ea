@@ -25,7 +25,7 @@ Before starting the interview, verify the installation:
 
 ```bash
 which mea          # binary exists
-ls ~/.mea/          # data dir exists
+ls /Users/I852000/vault/utilities/context-profiles/mea/  # vault data dir exists
 mea sync 2>&1      # can talk to Mail.app
 ```
 
@@ -123,7 +123,7 @@ Options:
 - "I want to change some"
 
 If they want changes, ask which labels to rename and update the skill file:
-- Edit `~/.claude/skills/mea/SKILL.md` — update the label descriptions in the Actions section
+- Edit `/Users/I852000/vault/utilities/ai-productivity/mail/access.md` — update the label descriptions in the Core Commands section
 
 ---
 
@@ -141,7 +141,7 @@ Options:
 Record this preference in PATTERNS.md:
 
 ```bash
-cat >> ~/.claude/skills/mea/PATTERNS.md << EOF
+cat >> /Users/I852000/vault/utilities/context-profiles/mea/PATTERNS.md << EOF
 
 ## $(date +%Y-%m-%d) — Onboarding
 
@@ -185,7 +185,7 @@ Record their wishlist in PATTERNS.md under a `## Feature Wishlist` section. Thes
    mea graph dump
    ```
 
-2. Read back `~/.mea/GRAPH_CONTEXT.md` and present a summary of what was set up:
+2. Read back `/Users/I852000/vault/utilities/context-profiles/mea/GRAPH_CONTEXT.md` and present a summary of what was set up:
    - Number of people, teams, orgs added
    - Number of triage rules created
    - VIP list

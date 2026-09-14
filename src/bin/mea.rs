@@ -23,8 +23,10 @@ fn run(cli_args: Cli) -> String {
             page_size,
             label,
             untriaged,
-        } => cmd_list(folder, page, page_size, label, untriaged),
+            needs_reply,
+        } => cmd_list(folder, page, page_size, label, untriaged, needs_reply),
         Commands::Read { id, all_folders } => cmd_read(id, all_folders),
+        Commands::Thread { id } => cmd_thread(id),
         Commands::Search {
             sender,
             subject,
@@ -33,8 +35,8 @@ fn run(cli_args: Cli) -> String {
             body,
         } => cmd_search(sender, subject, date_from, date_to, body),
         Commands::Label { id, label } => cmd_label(id, label),
-        Commands::Delete { ids, yes } => cmd_delete(ids, yes),
-        Commands::Archive { ids, yes } => cmd_archive(ids, yes),
+        Commands::Delete { ids, yes, force } => cmd_delete(ids, yes, force),
+        Commands::Archive { ids, yes, force } => cmd_archive(ids, yes, force),
         Commands::Flag { id, unflag } => cmd_flag(id, unflag),
         Commands::MarkRead { id, unread } => cmd_mark_read(id, unread),
         Commands::Triage { dry_run } => cmd_triage(dry_run),
@@ -101,12 +103,27 @@ fn get_sender_address(envelope_conn: &rusqlite::Connection, rowid: i64) -> Strin
         .unwrap_or_default()
 }
 
+/// Get the full subject (prefix + subject) from V10 envelope for a given rowid.
+fn get_subject(envelope_conn: &rusqlite::Connection, rowid: i64) -> String {
+    envelope_conn
+        .query_row(
+            "SELECT COALESCE(m.subject_prefix, '') || COALESCE(sub.subject, '')
+             FROM messages m
+             LEFT JOIN subjects sub ON m.subject = sub.ROWID
+             WHERE m.ROWID = ?1",
+            [rowid],
+            |r| r.get::<_, String>(0),
+        )
+        .unwrap_or_default()
+}
+
 fn cmd_list(
     folder: Option<String>,
     page: usize,
     page_size: usize,
     label_filter: Option<u8>,
     untriaged: bool,
+    needs_reply: bool,
 ) -> String {
     let envelope_conn = match open_envelope() {
         Ok(c) => c,
@@ -125,12 +142,33 @@ fn cmd_list(
         page_size,
         label_filter,
         untriaged,
+        needs_reply,
     ) {
         Ok(r) => r,
         Err(e) => return cli::error(&e.to_string(), "LIST_ERROR"),
     };
 
     cli::success(&result)
+}
+
+fn cmd_thread(id: i64) -> String {
+    let envelope_conn = match open_envelope() {
+        Ok(c) => c,
+        Err(e) => return cli::error(&e, "ENVELOPE_ERROR"),
+    };
+    let conv = match data::conversation_id_for(&envelope_conn, id) {
+        Some(c) => c,
+        None => {
+            return cli::error(
+                &format!("No conversation found for email {id}"),
+                "THREAD_NOT_FOUND",
+            );
+        }
+    };
+    match data::get_thread(&envelope_conn, conv) {
+        Ok(t) => cli::success(&t),
+        Err(e) => cli::error(&e.to_string(), "THREAD_ERROR"),
+    }
 }
 
 fn cmd_read(id: i64, all_folders: bool) -> String {
@@ -206,7 +244,7 @@ fn cmd_label(id: i64, label: u8) -> String {
     }
 }
 
-fn cmd_delete(ids: Vec<i64>, yes: bool) -> String {
+fn cmd_delete(ids: Vec<i64>, yes: bool, force: bool) -> String {
     if !yes {
         return cli::confirm(
             &format!("Delete {} email(s)? This moves them to Trash.", ids.len()),
@@ -243,7 +281,14 @@ fn cmd_delete(ids: Vec<i64>, yes: bool) -> String {
     for &id in &ids {
         let msg_id = get_message_id_header(&envelope_conn, id);
         let addr = get_sender_address(&envelope_conn, id);
-        if vip_addresses.iter().any(|v| v.eq_ignore_ascii_case(&addr)) {
+        let subject = get_subject(&envelope_conn, id);
+        // VIP protection applies to human correspondence, not auto-generated
+        // calendar status notices (e.g. "Declined: Features Sync"), which are
+        // noise even from a VIP.
+        if vip_addresses.iter().any(|v| v.eq_ignore_ascii_case(&addr))
+            && !rules::is_calendar_notice_subject(&subject)
+            && !force
+        {
             vip_message_ids.push(msg_id.clone());
         }
         message_ids.push(msg_id);
@@ -255,7 +300,7 @@ fn cmd_delete(ids: Vec<i64>, yes: bool) -> String {
     }
 }
 
-fn cmd_archive(ids: Vec<i64>, yes: bool) -> String {
+fn cmd_archive(ids: Vec<i64>, yes: bool, force: bool) -> String {
     if !yes {
         return cli::confirm(
             &format!("Archive {} email(s)?", ids.len()),
@@ -291,7 +336,14 @@ fn cmd_archive(ids: Vec<i64>, yes: bool) -> String {
     for &id in &ids {
         let msg_id = get_message_id_header(&envelope_conn, id);
         let addr = get_sender_address(&envelope_conn, id);
-        if vip_addresses.iter().any(|v| v.eq_ignore_ascii_case(&addr)) {
+        let subject = get_subject(&envelope_conn, id);
+        // VIP protection applies to human correspondence, not auto-generated
+        // calendar status notices (e.g. "Declined: Features Sync"), which are
+        // noise even from a VIP.
+        if vip_addresses.iter().any(|v| v.eq_ignore_ascii_case(&addr))
+            && !rules::is_calendar_notice_subject(&subject)
+            && !force
+        {
             vip_message_ids.push(msg_id.clone());
         }
         message_ids.push(msg_id);

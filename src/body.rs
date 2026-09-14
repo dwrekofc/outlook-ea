@@ -33,6 +33,8 @@ pub struct EmailDetail {
     pub subject: String,
     pub body_text: String,
     pub body_format: String, // "plain" or "markdown"
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub conversation_id: Option<i64>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -393,23 +395,34 @@ pub fn read_email_body(
     inbox_only: bool,
 ) -> BodyResult<EmailDetail> {
     // Get metadata from envelope index using V10 normalized schema
-    let (message_id, from, subject, date_sent): (String, String, String, i64) = envelope_conn
-        .query_row(
-            "SELECT COALESCE(mgd.message_id_header, ''),
+    let (message_id, from, subject, date_sent, conv_raw): (String, String, String, i64, i64) =
+        envelope_conn
+            .query_row(
+                "SELECT COALESCE(mgd.message_id_header, ''),
                     COALESCE(a.comment, '') || ' <' || COALESCE(a.address, '') || '>',
                     COALESCE(m.subject_prefix, '') || COALESCE(sub.subject, ''),
-                    COALESCE(m.date_sent, 0)
+                    COALESCE(m.date_sent, 0),
+                    COALESCE(m.conversation_id, 0)
              FROM messages m
              JOIN subjects sub ON m.subject = sub.ROWID
              JOIN addresses a ON m.sender = a.ROWID
              LEFT JOIN message_global_data mgd ON mgd.ROWID = m.global_message_id
              WHERE m.ROWID = ?1",
-            [rowid],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
-        )
-        .map_err(BodyError::Sqlite)?;
+                [rowid],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                    ))
+                },
+            )
+            .map_err(BodyError::Sqlite)?;
 
     let date = crate::data::unix_to_iso8601(date_sent);
+    let conversation_id = if conv_raw != 0 { Some(conv_raw) } else { None };
 
     // Check cache first
     if let Some(cached) = get_cached_body(overlay_conn, rowid)? {
@@ -423,6 +436,7 @@ pub fn read_email_body(
             subject,
             body_text: cached.body_text,
             body_format: cached.body_format,
+            conversation_id,
         });
     }
 
@@ -468,6 +482,7 @@ pub fn read_email_body(
         subject,
         body_text,
         body_format,
+        conversation_id,
     })
 }
 

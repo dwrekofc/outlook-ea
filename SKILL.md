@@ -2,12 +2,19 @@
 
 ## Skills
 
-Two skills ship with this project (install both to `~/.claude/skills/mea/`):
+Two skills ship with this project. Derek's active installs are thin wrappers around vault-owned productivity primitives:
 
 | Skill | File | Command | Purpose |
 |---|---|---|---|
 | mea | `skill/SKILL.md` | `/mea <instruction>` | Daily email management, triage, briefings |
 | mea-onboard | `skill/mea-onboard.md` | `/mea-onboard` | First-time setup interview |
+
+Canonical docs on Derek's machine:
+
+- Mail access: `/Users/I852000/vault/utilities/ai-productivity/mail/access.md`
+- Rules/logic: `/Users/I852000/vault/utilities/ai-productivity/rules/logic.md`
+- Projects/tasks: `/Users/I852000/vault/utilities/ai-productivity/tasks/projects.md`
+- Context graph: `/Users/I852000/vault/utilities/ai-productivity/context/graph.md`
 
 ## Quick Start
 
@@ -25,6 +32,7 @@ mea sync
 
 ## Data
 
-- `~/.mea/overlay.db` — SQLite (graph, labels, cached bodies)
-- `~/.mea/GRAPH_CONTEXT.md` — auto-generated context dump
-- `~/.claude/skills/mea/PATTERNS.md` — learned triage preferences
+- `/Users/I852000/vault/utilities/context-profiles/mea/overlay.db` — SQLite (graph, labels, cached bodies)
+- `/Users/I852000/vault/utilities/context-profiles/mea/GRAPH_CONTEXT.md` — auto-generated context dump
+- `/Users/I852000/vault/utilities/context-profiles/mea/PATTERNS.md` — learned triage preferences
+- `~/.mea` remains a compatibility symlink to the vault MEA directory.

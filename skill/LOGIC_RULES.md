@@ -1,0 +1,1 @@
+/Users/I852000/vault/utilities/ai-productivity/rules/logic.md

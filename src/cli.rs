@@ -31,6 +31,10 @@ pub enum Commands {
         /// Show only untriaged emails
         #[arg(long)]
         untriaged: bool,
+        /// Show only emails awaiting your reply (latest thread message is
+        /// inbound AND you are a direct To recipient)
+        #[arg(long)]
+        needs_reply: bool,
     },
     /// Read an email's body content
     Read {
@@ -39,6 +43,11 @@ pub enum Commands {
         /// Search all mail folders, not just Inbox
         #[arg(long)]
         all_folders: bool,
+    },
+    /// Show a full conversation thread (inbox + sent + archive) with reply status
+    Thread {
+        /// Email rowid (any message in the conversation)
+        id: i64,
     },
     /// Search emails
     Search {
@@ -72,6 +81,9 @@ pub enum Commands {
         /// Skip confirmation
         #[arg(long)]
         yes: bool,
+        /// Bypass VIP protection for these explicitly-listed ids (requires --yes)
+        #[arg(long)]
+        force: bool,
     },
     /// Archive an email
     Archive {
@@ -80,6 +92,9 @@ pub enum Commands {
         /// Skip confirmation
         #[arg(long)]
         yes: bool,
+        /// Bypass VIP protection for these explicitly-listed ids (requires --yes)
+        #[arg(long)]
+        force: bool,
     },
     /// Flag or unflag an email
     Flag {
@@ -392,7 +407,7 @@ mod tests {
     fn test_cli_parse_delete_with_yes() {
         use clap::Parser;
         let cli = Cli::parse_from(["mea", "delete", "--yes", "1", "2", "3"]);
-        if let Commands::Delete { ids, yes } = cli.command {
+        if let Commands::Delete { ids, yes, .. } = cli.command {
             assert_eq!(ids, vec![1, 2, 3]);
             assert!(yes);
         } else {

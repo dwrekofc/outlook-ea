@@ -67,6 +67,13 @@ pub fn auto_triage(
 
         let result = rules::evaluate_rules(config, &email.sender_address, &email.subject);
 
+        // VIP protection shields human correspondence from auto trash/archive,
+        // but NOT auto-generated calendar status notices (e.g. "Canceled: ..."),
+        // which are noise even from a VIP and should be cleared by the
+        // Auto-trash Calendar rules.
+        let vip_protected = rules::is_vip(config, &email.sender_address)
+            && !rules::is_calendar_notice_subject(&email.subject);
+
         match result {
             Some((rule_name, action)) => {
                 let triage_action = TriageAction {
@@ -92,7 +99,7 @@ pub fn auto_triage(
                         }
                         ActionType::Trash => {
                             // VIP emails are never trashed
-                            if !rules::is_vip(config, &email.sender_address) {
+                            if !vip_protected {
                                 if let Err(e) = actions::delete_email(&email.message_id) {
                                     summary
                                         .warnings
@@ -102,7 +109,7 @@ pub fn auto_triage(
                             }
                         }
                         ActionType::Archive => {
-                            if !rules::is_vip(config, &email.sender_address) {
+                            if !vip_protected {
                                 // Mark as read before archiving (e.g. SAP Appreciate)
                                 if let Err(e) = actions::set_read_status(&email.message_id, true) {
                                     summary.warnings.push(format!(
@@ -123,12 +130,12 @@ pub fn auto_triage(
                     match action.action_type {
                         ActionType::Label => summary.labeled.push(triage_action),
                         ActionType::Trash => {
-                            if !rules::is_vip(config, &email.sender_address) {
+                            if !vip_protected {
                                 summary.trashed.push(triage_action);
                             }
                         }
                         ActionType::Archive => {
-                            if !rules::is_vip(config, &email.sender_address) {
+                            if !vip_protected {
                                 summary.archived.push(triage_action);
                             }
                         }
@@ -193,7 +200,9 @@ mod tests {
             date: "2024-01-01T00:00:00+00:00".to_string(),
             is_read: false,
             folder: "INBOX".to_string(),
+            conversation_id: None,
             label: None,
+            needs_reply: None,
             sender_context: None,
         }
     }
