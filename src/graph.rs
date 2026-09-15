@@ -1,6 +1,8 @@
 mod context;
 pub use context::{get_sender_context, get_vip_emails};
 mod model;
+mod predicates;
+use predicates::canonical_predicate;
 mod rule_helpers;
 use chrono::Utc;
 use libsql::params;
@@ -148,6 +150,9 @@ pub fn add_edge(
     context: Option<&str>,
     weight: Option<f64>,
 ) -> GraphResult<i64> {
+    if predicate.contains('_') || predicate.chars().any(char::is_uppercase) {
+        return Err(GraphError::InvalidPredicate(predicate.to_owned()));
+    }
     store.transaction(|store| {
         get_node(store, source_id)?;
         get_node(store, target_id)?;
@@ -206,7 +211,7 @@ fn row_to_edge(row: &libsql::Row) -> anyhow::Result<Edge> {
         id: row.get(0)?,
         source_id: row.get(1)?,
         target_id: row.get(2)?,
-        predicate: row.get(3)?,
+        predicate: canonical_predicate(&row.get::<String>(3)?).into_owned(),
         context: row.get(4)?,
         weight: row.get::<Option<f64>>(5)?.unwrap_or(1.0),
         created_at: row.get(6)?,
@@ -284,3 +289,6 @@ mod regression_tests;
 
 #[cfg(test)]
 mod migration_tests;
+
+#[cfg(test)]
+mod storage_tests;

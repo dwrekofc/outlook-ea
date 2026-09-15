@@ -158,12 +158,12 @@ pub fn add_vip(
             Some(&rule_meta),
             false,
         )?;
-        add_edge(store, rule_id, person_id, "matches_sender", context, None)?;
+        add_edge(store, rule_id, person_id, "matches-sender", context, None)?;
         add_edge(
             store,
             rule_id,
             person_id,
-            "applies_action",
+            "applies-action",
             Some("label:1"),
             None,
         )?;
@@ -192,7 +192,7 @@ pub fn add_rule(
             store,
             rule_id,
             target_id,
-            &format!("matches_{match_type}"),
+            &format!("matches-{match_type}"),
             None,
             None,
         )?;
@@ -201,20 +201,16 @@ pub fn add_rule(
 }
 
 fn raw_edges(store: &Store, node_id: i64, predicate: Option<&str>) -> GraphResult<Vec<Edge>> {
-    match predicate {
-        Some(value) => Ok(store.all(
-            &edge_sql(
-                "WHERE (source_id = ?1 OR target_id = ?1) AND predicate = ?2 ORDER BY created_at",
-            ),
-            params![node_id, value],
-            row_to_edge,
-        )?),
-        None => Ok(store.all(
-            &edge_sql("WHERE source_id = ?1 OR target_id = ?1 ORDER BY created_at"),
-            params![node_id],
-            row_to_edge,
-        )?),
+    let mut edges = store.all(
+        &edge_sql("WHERE source_id = ?1 OR target_id = ?1 ORDER BY created_at"),
+        params![node_id],
+        row_to_edge,
+    )?;
+    if let Some(value) = predicate {
+        let expected = super::canonical_predicate(value);
+        edges.retain(|edge| edge.predicate == expected);
     }
+    Ok(edges)
 }
 
 fn neighbor_edges(
@@ -251,15 +247,15 @@ fn rule_details(store: &Store, rule: Node) -> GraphResult<RuleWithDetails> {
             &edge.source
         };
         match edge.edge.predicate.as_str() {
-            "matches_sender" => {
+            "matches-sender" => {
                 details.match_type = Some("sender".to_string());
                 details.match_value = target.email.clone().or_else(|| Some(target.name.clone()));
             }
-            "matches_subject" => {
+            "matches-subject" => {
                 details.match_type = Some("subject".to_string());
                 details.match_value = Some(target.name.clone());
             }
-            pred if pred.starts_with("applies_action") => {
+            pred if pred.starts_with("applies-action") => {
                 details.action_type = edge.edge.context.clone().or_else(|| Some(pred.to_string()));
                 details.action_value = edge.edge.context.clone();
             }

@@ -100,7 +100,7 @@ Apple Mail ←(AppleScript)→ mea CLI ←(libsql)→ vault Turso
 
 **Unified database** — Shared state lives in the vault Turso database. Local preferences and generated context dumps remain under `~/.mea`. Labels, triage rules, graph nodes/edges, cached bodies. Nothing is written back to Apple Mail (except mark-as-read/archive/delete actions you explicitly approve).
 
-**Graph** — A lightweight knowledge graph storing people, teams, orgs, projects, topics, vendors, and rules as nodes with typed edges (manages, reports_to, member_of, etc.). This is what powers auto-triage — rules match senders/subjects and apply actions.
+**Graph** — A lightweight knowledge graph storing people, teams, orgs, projects, topics, vendors, and rules as nodes with typed edges (manages, reports-to, member-of, etc.). This is what powers auto-triage — rules match senders/subjects and apply actions.
 
 **PATTERNS.md** — Append-only log of your triage preferences. Claude writes to this during triage sessions when it notices consistent decisions. On future sessions, Claude reads this to pre-suggest actions.
 
@@ -171,7 +171,7 @@ Rules live in the graph as `rule` nodes with edges to `action` nodes:
 ### Graph Nodes & Edges
 The graph models your work world:
 - **Nodes:** person, team, org, project, topic, vendor, rule, action, task
-- **Edges:** manages, reports_to, member_of, leads, works_on, owns, expert_in, contact_for, collaborates, belongs_to
+- **Edges:** manages, reports-to, member-of, leads, works-on, owns, expert-in, contact-for, collaborates-with, belongs-to
 
 This lets Claude understand context — "this email is from Sarah who manages the Platform team and is your skip-level" — which informs triage suggestions.
 

@@ -98,12 +98,12 @@ An interactive interview that sets up a new user's mea instance from scratch. It
 The graph is the core differentiator. Instead of flat rules, mea builds a model of your work world:
 
 ```
-┌─────────┐  manages   ┌──────────┐  member_of  ┌──────┐
+┌─────────┐  manages   ┌──────────┐  member-of  ┌──────┐
 │  Alice   │──────────→│  Platform │←────────────│ Bob  │
 │ (person) │           │  (team)   │             │(VIP) │
 └─────────┘           └──────────┘             └──────┘
                            │                       │
-                      works_on                expert_in
+                      works-on                expert-in
                            ↓                       ↓
                       ┌─────────┐            ┌─────────┐
                       │ Q3 Infra│            │  Auth   │
@@ -113,9 +113,11 @@ The graph is the core differentiator. Instead of flat rules, mea builds a model 
 
 **Node types:** person, team, org, project, topic, vendor, rule, action, task
 
-**Edge types:** manages, reports_to, member_of, leads, works_on, owns, expert_in, contact_for, collaborates, belongs_to, matches_sender, matches_subject, applies_action, protects
+**Edge types:** manages, reports-to, member-of, leads, works-on, owns, expert-in, contact-for, collaborates-with, belongs-to, matches-sender, matches-subject, applies-action, protects
 
-**Triage rules** are graph nodes too — a `rule` node connects to a `matches_sender` edge and an `applies_action` edge. This means rules are queryable, linkable, and visible alongside the rest of your context.
+Predicates use lowercase hyphenated spelling. Writes reject underscores and uppercase. Reads temporarily accept underscore spellings while vault migrates existing edges; drop underscore fallback next release.
+
+**Triage rules** are graph nodes too — a `rule` node connects to a `matches-sender` edge and an `applies-action` edge. This means rules are queryable, linkable, and visible alongside the rest of your context.
 
 ### Graph Commands
 
@@ -126,7 +128,7 @@ mea graph add-vip --email "boss@company.com" --name "Boss" --description "Skip-l
 
 # Teams & Orgs
 mea graph add --type team --name "Platform"
-mea graph link --from 1 --to 2 --predicate member_of
+mea graph link --from 1 --to 2 --predicate member-of
 
 # Rules
 mea graph add-rule --name "Jira noise" --match-sender "noreply@jira.com" --action archive
