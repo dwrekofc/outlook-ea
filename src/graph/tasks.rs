@@ -45,7 +45,7 @@ pub fn add_task(
             false,
         )?;
         if let Some(project) = project_id {
-            add_edge(store, task_id, project, "belongs_to", None, None)?;
+            add_edge(store, task_id, project, "belongs-to", None, None)?;
         }
         Ok(task_id)
     })
@@ -201,12 +201,12 @@ fn relationship_line(names: &std::collections::HashMap<i64, String>, edge: &Edge
 }
 
 fn belongs_to_project(store: &Store, task_id: i64, project_id: i64) -> GraphResult<bool> {
-    Ok(store
-        .one(
-            "SELECT 1 FROM graph_edges
-             WHERE source_id = ?1 AND target_id = ?2 AND predicate = 'belongs_to'",
-            params![task_id, project_id],
-            |_| Ok(1_i64),
-        )?
-        .is_some())
+    let predicates = store.all(
+        "SELECT predicate FROM graph_edges WHERE source_id = ?1 AND target_id = ?2",
+        params![task_id, project_id],
+        |row| Ok(row.get::<String>(0)?),
+    )?;
+    Ok(predicates
+        .iter()
+        .any(|predicate| super::canonical_predicate(predicate) == "belongs-to"))
 }

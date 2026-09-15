@@ -65,12 +65,12 @@ Options: (free text)
 For each person mentioned:
 - `mea graph add --type person --name "..." --description "..."` 
 - If they sound important: `mea graph add-vip --email "..." --name "..." --description "..."`
-- Link relationships: `mea graph link --from <id> --to <id> --predicate manages|reports_to|collaborates`
+- Link relationships: `mea graph link --from <id> --to <id> --predicate manages|reports-to|collaborates-with`
 
 If they mention teams or orgs:
 - `mea graph add --type team --name "..."`
 - `mea graph add --type org --name "..."`
-- Link people to teams: `mea graph link --from <person_id> --to <team_id> --predicate member_of`
+- Link people to teams: `mea graph link --from <person_id> --to <team_id> --predicate member-of`
 
 Ask follow-up questions if the org structure is unclear. Build out the graph iteratively.
 

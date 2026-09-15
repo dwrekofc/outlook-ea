@@ -5,6 +5,10 @@ use crate::db;
 
 #[derive(Error, Debug)]
 pub enum GraphError {
+    #[error(
+        "Invalid predicate {0:?}: use lowercase hyphenated spelling; underscores and uppercase are not allowed"
+    )]
+    InvalidPredicate(String),
     #[error("Database error: {0}")]
     Db(#[from] db::DbError),
     #[error("Node not found: {0}")]

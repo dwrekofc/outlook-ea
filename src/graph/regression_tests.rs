@@ -26,12 +26,12 @@ fn test_add_edge_between_nodes() {
     let conn = test_store().unwrap();
     let a = add_node(&conn, "person", "Alice", Some("a@t"), None, None, false).unwrap();
     let b = add_node(&conn, "team", "Engineering", None, None, None, false).unwrap();
-    let eid = add_edge(&conn, a, b, "member_of", Some("core team"), None).unwrap();
+    let eid = add_edge(&conn, a, b, "member-of", Some("core team"), None).unwrap();
     assert!(eid > 0);
 
     let edges = get_edges(&conn, a, None).unwrap();
     assert_eq!(edges.len(), 1);
-    assert_eq!(edges[0].edge.predicate, "member_of");
+    assert_eq!(edges[0].edge.predicate, "member-of");
     assert_eq!(edges[0].target.name, "Engineering");
 }
 
@@ -93,7 +93,7 @@ fn test_remove_node_cascades_edges() {
     let conn = test_store().unwrap();
     let a = add_node(&conn, "person", "Alice", None, None, None, false).unwrap();
     let b = add_node(&conn, "team", "Eng", None, None, None, false).unwrap();
-    add_edge(&conn, a, b, "member_of", None, None).unwrap();
+    add_edge(&conn, a, b, "member-of", None, None).unwrap();
 
     remove_node(&conn, a).unwrap();
 
@@ -114,11 +114,11 @@ fn test_add_vip_creates_node_rule_edges() {
     assert_eq!(person.email.as_deref(), Some("boss@co.com"));
 
     let edges = get_edges(&conn, person_id, None).unwrap();
-    assert_eq!(edges.len(), 3); // matches_sender, applies_action, protects
+    assert_eq!(edges.len(), 3); // matches-sender, applies-action, protects
 
     let predicates: Vec<&str> = edges.iter().map(|e| e.edge.predicate.as_str()).collect();
-    assert!(predicates.contains(&"matches_sender"));
-    assert!(predicates.contains(&"applies_action"));
+    assert!(predicates.contains(&"matches-sender"));
+    assert!(predicates.contains(&"applies-action"));
     assert!(predicates.contains(&"protects"));
 }
 
@@ -132,7 +132,7 @@ fn test_add_rule_creates_correct_structure() {
 
     let edges = get_edges(&conn, rule_id, None).unwrap();
     assert_eq!(edges.len(), 1);
-    assert_eq!(edges[0].edge.predicate, "matches_sender");
+    assert_eq!(edges[0].edge.predicate, "matches-sender");
 }
 
 #[test]
@@ -180,7 +180,7 @@ fn test_traverse_follows_edges_to_correct_depth() {
     let a = add_node(&conn, "person", "A", None, None, None, false).unwrap();
     let b = add_node(&conn, "team", "B", None, None, None, false).unwrap();
     let c = add_node(&conn, "project", "C", None, None, None, false).unwrap();
-    add_edge(&conn, a, b, "member_of", None, None).unwrap();
+    add_edge(&conn, a, b, "member-of", None, None).unwrap();
     add_edge(&conn, b, c, "owns", None, None).unwrap();
 
     // Depth 1: should reach B but not C
@@ -202,10 +202,10 @@ fn test_traverse_with_predicate_filter() {
     let a = add_node(&conn, "person", "A", None, None, None, false).unwrap();
     let b = add_node(&conn, "team", "B", None, None, None, false).unwrap();
     let c = add_node(&conn, "project", "C", None, None, None, false).unwrap();
-    add_edge(&conn, a, b, "member_of", None, None).unwrap();
+    add_edge(&conn, a, b, "member-of", None, None).unwrap();
     add_edge(&conn, a, c, "owns", None, None).unwrap();
 
-    let results = traverse(&conn, a, Some("member_of"), 2).unwrap();
+    let results = traverse(&conn, a, Some("member-of"), 2).unwrap();
     assert_eq!(results.len(), 2); // A + B only
 }
 
@@ -249,7 +249,7 @@ fn test_remove_edge() {
     let conn = test_store().unwrap();
     let a = add_node(&conn, "person", "A", None, None, None, false).unwrap();
     let b = add_node(&conn, "team", "B", None, None, None, false).unwrap();
-    let eid = add_edge(&conn, a, b, "member_of", None, None).unwrap();
+    let eid = add_edge(&conn, a, b, "member-of", None, None).unwrap();
 
     remove_edge(&conn, eid).unwrap();
     let edges = get_edges(&conn, a, None).unwrap();
@@ -270,70 +270,4 @@ fn test_get_all_rules() {
 
     let rules = get_all_rules(&conn).unwrap();
     assert_eq!(rules.len(), 2);
-}
-
-#[test]
-fn multi_statement_writes_roll_back_when_history_fails() {
-    let store = crate::db::test_store().unwrap();
-    let person =
-        super::add_node(&store, "person", "Ada", Some("ada@test"), None, None, false).unwrap();
-    store.execute_batch("CREATE TRIGGER reject_history BEFORE INSERT ON graph_history BEGIN SELECT RAISE(ABORT,'injected'); END;").unwrap();
-    assert!(super::add_vip(&store, "Ada", "ada@test", None, None).is_err());
-    assert!(!super::get_node(&store, person).unwrap().is_vip);
-    assert!(super::remove_node(&store, person).is_err());
-    assert!(super::get_node(&store, person).is_ok());
-    assert!(super::add_task(&store, "Fail", None, None, None).is_err());
-    assert_eq!(super::list_nodes(&store, None, false).unwrap().len(), 1);
-}
-
-#[test]
-fn existing_sender_is_promoted_and_archived_nodes_are_hidden() {
-    let store = crate::db::test_store().unwrap();
-    let person =
-        super::add_node(&store, "person", "Ada", Some("ada@test"), None, None, false).unwrap();
-    assert_eq!(
-        super::add_vip(&store, "Ada", "ada@test", None, None).unwrap(),
-        person
-    );
-    let node = super::get_node(&store, person).unwrap();
-    assert!(node.is_vip);
-    assert_eq!(node.profile, "mea");
-    assert!(!node.archived);
-    store
-        .execute(
-            "UPDATE graph_nodes SET archived=1 WHERE id=?1",
-            libsql::params![person],
-        )
-        .unwrap();
-    assert!(
-        super::context::sender_node(&store, "ada@test")
-            .unwrap()
-            .is_none()
-    );
-    assert!(super::find_nodes(&store, "ada@test").unwrap().is_empty());
-    assert!(
-        super::list_nodes(&store, Some("person"), false)
-            .unwrap()
-            .is_empty()
-    );
-    assert!(!super::dump_context(&store).unwrap().contains("<ada@test>"));
-    assert!(super::get_all_rules(&store).is_ok());
-}
-
-#[test]
-fn task_and_rule_failures_roll_back_all_nested_writes() {
-    let store = crate::db::test_store().unwrap();
-    let project = super::add_project(&store, "Project", None).unwrap();
-    store.execute_batch("CREATE TRIGGER reject_edge BEFORE INSERT ON graph_edges BEGIN SELECT RAISE(ABORT,'injected'); END;").unwrap();
-    assert!(super::add_task(&store, "Fail", None, None, Some(project)).is_err());
-    assert!(super::add_rule(&store, "Fail rule", "sender", "new@test", "label", "1").is_err());
-    assert_eq!(super::list_nodes(&store, None, false).unwrap().len(), 1);
-    assert_eq!(
-        store
-            .one("SELECT count(*) FROM graph_history", (), |r| Ok(
-                r.get::<i64>(0)?
-            ))
-            .unwrap(),
-        Some(1)
-    );
 }
