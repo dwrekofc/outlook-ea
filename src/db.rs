@@ -4,6 +4,7 @@ use anyhow::{Context, Result, bail};
 use libsql::{Connection, Database, params};
 mod config;
 mod connection;
+mod replica;
 use serde::{Deserialize, Serialize};
 use tokio::runtime::{Builder as RuntimeBuilder, Runtime};
 
@@ -24,6 +25,7 @@ pub struct Store {
     connection: Connection,
     runtime: Rc<Runtime>,
     in_transaction: bool,
+    replica_path: Option<std::path::PathBuf>,
 }
 
 impl Store {
@@ -45,13 +47,21 @@ impl Store {
     }
 
     pub fn connect(url: &str, auth_token: &str) -> DbResult<Self> {
-        let runtime = RuntimeBuilder::new_current_thread().enable_all().build()?;
+        let runtime = RuntimeBuilder::new_multi_thread()
+            .worker_threads(1)
+            .enable_all()
+            .build()?;
         let (database, connection) = runtime.block_on(connection::open(url, auth_token))?;
         Ok(Self {
             _database: Rc::new(database),
             connection,
             runtime: Rc::new(runtime),
             in_transaction: false,
+            replica_path: if config::is_remote(url) {
+                Some(replica::path()?)
+            } else {
+                None
+            },
         })
     }
 
@@ -63,6 +73,7 @@ impl Store {
             connection,
             runtime: Rc::new(runtime),
             in_transaction: false,
+            replica_path: None,
         })
     }
 
@@ -75,6 +86,7 @@ impl Store {
         if self.in_transaction {
             return apply(self);
         }
+        self.prepare_write().map_err(E::from)?;
         let tx = self
             .runtime
             .block_on(
@@ -87,12 +99,14 @@ impl Store {
             connection: (*tx).clone(),
             runtime: Rc::clone(&self.runtime),
             in_transaction: true,
+            replica_path: self.replica_path.clone(),
         };
         match apply(&scoped) {
             Ok(value) => {
                 self.runtime
                     .block_on(tx.commit())
                     .map_err(anyhow::Error::from)?;
+                self.sync_after_write().map_err(E::from)?;
                 Ok(value)
             }
             Err(error) => {
@@ -105,15 +119,42 @@ impl Store {
     }
 
     pub fn execute(&self, sql: &str, params: impl libsql::params::IntoParams) -> DbResult<u64> {
-        self.runtime
+        self.prepare_write()?;
+        let changed = self
+            .runtime
             .block_on(self.connection.execute(sql, params))
-            .with_context(|| format!("database execute failed: {sql}"))
+            .with_context(|| {
+                format!("replica_write_failed: primary write failed (no offline queue): {sql}")
+            })?;
+        self.sync_after_write()?;
+        Ok(changed)
     }
 
     pub fn execute_batch(&self, sql: &str) -> DbResult<()> {
+        self.prepare_write()?;
         self.runtime
             .block_on(self.connection.execute_batch(sql))
-            .with_context(|| "database batch failed")?;
+            .with_context(|| "replica_write_failed: database batch failed (no offline queue)")?;
+        self.sync_after_write()?;
+        Ok(())
+    }
+
+    fn prepare_write(&self) -> DbResult<()> {
+        if !self.in_transaction && self.replica_path.is_some() {
+            self.runtime
+                .block_on(self.connection.execute("PRAGMA foreign_keys = ON", ()))
+                .context("replica_write_failed: primary unavailable; no offline queue")?;
+        }
+        Ok(())
+    }
+
+    fn sync_after_write(&self) -> DbResult<()> {
+        if !self.in_transaction
+            && let Some(path) = &self.replica_path
+        {
+            self.runtime
+                .block_on(replica::sync(&self._database, path))?;
+        }
         Ok(())
     }
 

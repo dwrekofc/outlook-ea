@@ -3,15 +3,17 @@ use anyhow::{Context, Result, ensure};
 use libsql::{Builder, Connection, Database, OpenFlags};
 use std::path::Path;
 
-/// The shared vault connection boundary. D17's future embedded replica changes here.
-/// This milestone deliberately follows vault-cli's current remote connection.
+/// Per-tool replica of the shared primary (D17).
 pub(super) async fn open(url: &str, token: &str) -> Result<(Database, Connection)> {
     let database = if is_remote(url) {
         ensure!(
             !token.trim().is_empty(),
             "Vault auth_token is required for remote database URL"
         );
-        Builder::new_remote(url.to_owned(), token.to_owned())
+        let path = super::replica::path()?;
+        std::fs::create_dir_all(path.parent().context("replica path has no parent")?)?;
+        Builder::new_synced_database(path, url.to_owned(), token.to_owned())
+            .remote_writes(true)
             .build()
             .await
             .context("failed to connect to Turso")?
@@ -23,7 +25,12 @@ pub(super) async fn open(url: &str, token: &str) -> Result<(Database, Connection
             .context("failed to open configured local vault database")?
     };
     let connection = database.connect()?;
-    connection.execute("PRAGMA foreign_keys = ON", ()).await?;
+    if is_remote(url) {
+        super::replica::on_connect(&database, &connection).await?;
+    }
+    if !is_remote(url) {
+        connection.execute("PRAGMA foreign_keys = ON", ()).await?;
+    }
     Ok((database, connection))
 }
 

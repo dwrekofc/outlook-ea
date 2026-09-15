@@ -4,7 +4,14 @@ use std::{fs, path::PathBuf};
 
 impl VaultSettings {
     pub(crate) fn load() -> Result<Self> {
-        Self::load_from(&config_path()?)
+        let mut settings = Self::load_from(&config_path()?)?;
+        if let Ok(url) = std::env::var("VAULT_DATABASE_URL") {
+            settings.database_url = Some(url);
+        }
+        if let Ok(token) = std::env::var("VAULT_AUTH_TOKEN") {
+            settings.auth_token = Some(token);
+        }
+        Ok(settings)
     }
 
     pub(super) fn load_from(path: &std::path::Path) -> Result<Self> {
@@ -22,7 +29,7 @@ pub(super) fn is_remote(url: &str) -> bool {
     url.starts_with("libsql://") || url.starts_with("https://") || url.starts_with("http://")
 }
 
-fn config_path() -> Result<PathBuf> {
+pub(super) fn config_path() -> Result<PathBuf> {
     if let Some(path) = std::env::var_os("VAULT_CONFIG") {
         return Ok(PathBuf::from(path));
     }
