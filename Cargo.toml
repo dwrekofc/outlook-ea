@@ -8,6 +8,7 @@ name = "mea"
 path = "src/bin/mea.rs"
 
 [dependencies]
+libc = "=0.2.186"
 anyhow = "=1.0.102"
 chrono = { version = "=0.4.44", features = ["serde"] }
 clap = { version = "=4.6.0", features = ["derive"] }
