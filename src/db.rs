@@ -4,6 +4,7 @@ use anyhow::{Context, Result, bail};
 use libsql::{Connection, Database, params};
 mod config;
 mod connection;
+mod replica;
 use serde::{Deserialize, Serialize};
 use tokio::runtime::{Builder as RuntimeBuilder, Runtime};
 
@@ -24,6 +25,7 @@ pub struct Store {
     connection: Connection,
     runtime: Rc<Runtime>,
     in_transaction: bool,
+    replica: Option<Rc<replica::Replica>>,
 }
 
 impl Store {
@@ -45,13 +47,18 @@ impl Store {
     }
 
     pub fn connect(url: &str, auth_token: &str) -> DbResult<Self> {
-        let runtime = RuntimeBuilder::new_current_thread().enable_all().build()?;
-        let (database, connection) = runtime.block_on(connection::open(url, auth_token))?;
+        let runtime = RuntimeBuilder::new_multi_thread()
+            .worker_threads(1)
+            .enable_all()
+            .build()?;
+        let (database, connection, replica) =
+            runtime.block_on(connection::open(url, auth_token))?;
         Ok(Self {
             _database: Rc::new(database),
             connection,
             runtime: Rc::new(runtime),
             in_transaction: false,
+            replica: replica.map(Rc::new),
         })
     }
 
@@ -63,6 +70,7 @@ impl Store {
             connection,
             runtime: Rc::new(runtime),
             in_transaction: false,
+            replica: None,
         })
     }
 
@@ -75,45 +83,83 @@ impl Store {
         if self.in_transaction {
             return apply(self);
         }
+        let _exclusive = self
+            .replica
+            .as_ref()
+            .map(|r| r.lock.exclusive())
+            .transpose()
+            .map_err(E::from)?;
         let tx = self
-            .runtime
-            .block_on(
+            .db_call(
                 self.connection
                     .transaction_with_behavior(libsql::TransactionBehavior::Immediate),
             )
-            .map_err(anyhow::Error::from)?;
+            .map_err(E::from)?;
         let scoped = Store {
             _database: Rc::clone(&self._database),
             connection: (*tx).clone(),
             runtime: Rc::clone(&self.runtime),
             in_transaction: true,
+            replica: self.replica.clone(),
         };
         match apply(&scoped) {
             Ok(value) => {
-                self.runtime
-                    .block_on(tx.commit())
-                    .map_err(anyhow::Error::from)?;
+                self.db_call(tx.commit()).map_err(E::from)?;
+                self.sync_after_write().map_err(E::from)?;
                 Ok(value)
             }
             Err(error) => {
-                self.runtime
-                    .block_on(tx.rollback())
-                    .map_err(anyhow::Error::from)?;
+                self.db_call(tx.rollback()).map_err(E::from)?;
                 Err(error)
             }
         }
     }
 
-    pub fn execute(&self, sql: &str, params: impl libsql::params::IntoParams) -> DbResult<u64> {
+    fn db_call<T>(
+        &self,
+        future: impl std::future::Future<Output = libsql::Result<T>>,
+    ) -> DbResult<T> {
         self.runtime
-            .block_on(self.connection.execute(sql, params))
-            .with_context(|| format!("database execute failed: {sql}"))
+            .block_on(replica::write(self.replica.is_some(), async {
+                Ok(future.await?)
+            }))
+    }
+
+    pub fn execute(&self, sql: &str, params: impl libsql::params::IntoParams) -> DbResult<u64> {
+        let _exclusive = if !self.in_transaction {
+            self.replica
+                .as_ref()
+                .map(|r| r.lock.exclusive())
+                .transpose()?
+        } else {
+            None
+        };
+        let changed = self.db_call(self.connection.execute(sql, params))?;
+        self.sync_after_write()?;
+        Ok(changed)
     }
 
     pub fn execute_batch(&self, sql: &str) -> DbResult<()> {
-        self.runtime
-            .block_on(self.connection.execute_batch(sql))
-            .with_context(|| "database batch failed")?;
+        let _exclusive = if !self.in_transaction {
+            self.replica
+                .as_ref()
+                .map(|r| r.lock.exclusive())
+                .transpose()?
+        } else {
+            None
+        };
+        self.db_call(self.connection.execute_batch(sql))?;
+        self.sync_after_write()
+    }
+
+    fn sync_after_write(&self) -> DbResult<()> {
+        if !self.in_transaction
+            && let Some(replica) = &self.replica
+        {
+            self.runtime
+                .block_on(replica.sync_locked(&self._database, 15))
+                .context(replica::ReplicaError::PrimaryWriteFailed)?;
+        }
         Ok(())
     }
 
@@ -123,11 +169,8 @@ impl Store {
         params: impl libsql::params::IntoParams,
         map: impl FnOnce(&libsql::Row) -> Result<T>,
     ) -> DbResult<Option<T>> {
-        let mut rows = self
-            .runtime
-            .block_on(self.connection.query(sql, params))
-            .with_context(|| format!("database query failed: {sql}"))?;
-        let row = self.runtime.block_on(rows.next())?;
+        let mut rows = self.db_call(self.connection.query(sql, params))?;
+        let row = self.db_call(rows.next())?;
         row.map(|value| map(&value)).transpose()
     }
 
@@ -137,12 +180,9 @@ impl Store {
         params: impl libsql::params::IntoParams,
         mut map: impl FnMut(&libsql::Row) -> Result<T>,
     ) -> DbResult<Vec<T>> {
-        let mut rows = self
-            .runtime
-            .block_on(self.connection.query(sql, params))
-            .with_context(|| format!("database query failed: {sql}"))?;
+        let mut rows = self.db_call(self.connection.query(sql, params))?;
         let mut result = Vec::new();
-        while let Some(row) = self.runtime.block_on(rows.next())? {
+        while let Some(row) = self.db_call(rows.next())? {
             result.push(map(&row)?);
         }
         Ok(result)
