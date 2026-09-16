@@ -245,3 +245,41 @@ The `/mea-onboard` skill is designed to help you set up your own version interac
 MIT
 
 MEA requires vault schema 4 (`vault init` after installing the updated vault binary). Live mail aliases use `(hostname, rowid)` and update with a warning when reused. Each Mac must have a distinct hostname. Imported aliases remain historical provenance. `notes_path` comes from vault config and defaults to `~/vault`; no `~/.mea` symlink is required for dumps.
+
+### Automatic body capture
+
+`mea cache-bodies --dry-run --json` previews missing bodies in the inbox using the
+existing local replica (no sync, extraction, or database writes). Counts reflect
+that replica's last sync; `mea replica status` shows its age. Run `mea replica sync`
+explicitly if a fresh preview is needed.
+
+`mea cache-bodies [--since YYYY-MM-DD] [--all] [--limit 200] [--json]` captures full
+content through the same `.emlx`/HTML-to-text extraction used by `mea read`.
+Default scope is the inbox; `--all` includes every Apple Mail folder and `--since`
+is inclusive at midnight UTC. Messages are processed newest first, deduplicated by
+message ID. Existing bodies are never overwritten. New identities use
+`work-outlook`; existing identities retain their account, which owns the body via
+`identity_id`. No VIP or exclusion rules apply.
+
+The limit bounds uncached attempts (including failures), not existing rows scanned;
+`--limit 0` does no work. Output includes scanned, cached, skipped_existing, failed
+(with rowids/message IDs), duration_ms, and would_cache for previews. A preview
+counts eligible missing bodies without proving their `.emlx` files are available.
+Replica contention or sync/write failures stop the run with counts and exit 0 so
+the next timer cycle can retry. A write whose confirmation fails may already have
+committed; the next run safely skips it. Each message transaction plus sync has a
+15-second deadline, separate from local extraction and replica startup deadlines.
+
+`mea cache-bodies install-timer [--interval 15m]` installs and loads
+`~/Library/LaunchAgents/com.mea.cache-bodies.plist`; `uninstall-timer` unloads and
+removes it. The timer uses the absolute path of the installing binary, runs
+`mea cache-bodies --limit 200 --json`, and appends stdout/stderr through launchd to
+`~/.config/vault/logs/mea-cache-bodies.log` (directory created on install).
+Installing MEA's own plist is allowed under the capture-only rule: this job only
+reads Apple Mail and captures content into the shared cache. It never changes the
+mailbox. Install from the released binary; do not install from a temporary checkout.
+
+`mea replica status|sync|reset` inspects, syncs, or removes only MEA's disposable
+replica and sync state. Reset refuses while another MEA connection holds the lock;
+it preserves lock files and never touches vault's replica or the primary. The next
+ordinary command bootstraps again. Status needs no network connection.

@@ -34,11 +34,15 @@ impl Replica {
             fresh || PathBuf::from(format!("{}-info", path.display())).exists(),
             "replica_sync_failed: replica metadata is missing; reset this tool's replica"
         );
-        let database = Builder::new_synced_database(path, url.to_owned(), token.to_owned())
-            .remote_writes(true)
-            .build()
-            .await
-            .context(ReplicaError::SyncFailed)?;
+        let database = tokio::time::timeout(
+            Duration::from_secs(15),
+            Builder::new_synced_database(path, url.to_owned(), token.to_owned())
+                .remote_writes(true)
+                .build(),
+        )
+        .await
+        .context(ReplicaError::SyncFailed)?
+        .context(ReplicaError::SyncFailed)?;
         if fresh {
             let _exclusive = replica.lock.exclusive()?;
             // Bind before download; a partial bootstrap is never reused for another primary.
@@ -97,3 +101,6 @@ pub(super) fn path() -> Result<PathBuf> {
         .context("config path has no parent")?
         .join("replica/mea.db"))
 }
+
+mod command;
+pub use command::{Command, command};
