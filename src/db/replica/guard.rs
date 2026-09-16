@@ -98,7 +98,6 @@ impl Drop for Exclusive<'_> {
         let _ = flock(&self.lock.gate, libc::LOCK_UN);
     }
 }
-#[cfg(test)]
 pub fn files(path: &Path) -> Vec<PathBuf> {
     ["", "-wal", "-shm", "-info", "-client_wal_index"]
         .iter()
@@ -106,7 +105,6 @@ pub fn files(path: &Path) -> Vec<PathBuf> {
         .chain([path.with_extension("sync.json")])
         .collect()
 }
-#[cfg(test)]
 pub fn reset(path: &Path) -> Result<()> {
     let lock = ReplicaLock::open(path)?;
     let _exclusive = lock.exclusive()?;

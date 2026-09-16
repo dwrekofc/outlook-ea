@@ -1,3 +1,5 @@
+mod metadata;
+use metadata::email_metadata;
 mod support;
 use chrono::Utc;
 use libsql::params;
@@ -206,11 +208,13 @@ pub fn read_email_body(
     if let Some(cached) = get_cached_body(store, rowid, &metadata.message_id)? {
         return Ok(metadata.into_detail(cached));
     }
-    let message = parse_emlx(&std::fs::read(find_email_file(rowid, inbox_only)?)?)?;
-    let (body_text, body_format) = parse_email_body(&message)?;
-    let parsed = mailparse::parse_mail(&message).map_err(|e| BodyError::Parse(e.to_string()))?;
-    let to = header_values(&parsed, "to");
-    let cc = header_values(&parsed, "cc");
+    let cached = extract_email_body(rowid, inbox_only)?;
+    let CachedBody {
+        body_text,
+        body_format,
+        to,
+        cc,
+    } = cached;
     if !metadata.message_id.trim().is_empty() {
         cache_body(
             store,
@@ -230,58 +234,19 @@ pub fn read_email_body(
     }))
 }
 
-struct EmailMetadata {
-    id: i64,
-    message_id: String,
-    from: String,
-    date: String,
-    subject: String,
-    conversation_id: Option<i64>,
-}
-
-impl EmailMetadata {
-    fn into_detail(self, cached: CachedBody) -> EmailDetail {
-        EmailDetail {
-            id: self.id,
-            message_id: self.message_id,
-            from: self.from,
-            to: cached.to,
-            cc: cached.cc,
-            date: self.date,
-            subject: self.subject,
-            body_text: cached.body_text,
-            body_format: cached.body_format,
-            conversation_id: self.conversation_id,
-        }
-    }
-}
-
-fn email_metadata(conn: &Store, rowid: i64) -> BodyResult<EmailMetadata> {
-    conn.one(
-        "SELECT COALESCE(mgd.message_id_header, ''),
-            COALESCE(a.comment, '') || ' <' || COALESCE(a.address, '') || '>',
-            COALESCE(m.subject_prefix, '') || COALESCE(sub.subject, ''),
-            COALESCE(m.date_sent, 0), COALESCE(m.conversation_id, 0)
-         FROM messages m
-         JOIN subjects sub ON m.subject = sub.ROWID
-         JOIN addresses a ON m.sender = a.ROWID
-         LEFT JOIN message_global_data mgd ON mgd.ROWID = m.global_message_id
-         WHERE m.ROWID = ?1",
-        params![rowid],
-        |row| {
-            let conv: i64 = row.get(4)?;
-            Ok(EmailMetadata {
-                id: rowid,
-                message_id: row.get::<String>(0)?,
-                from: row.get::<String>(1)?,
-                subject: row.get::<String>(2)?,
-                date: crate::data::unix_to_iso8601(row.get::<i64>(3)?),
-                conversation_id: (conv != 0).then_some(conv),
-            })
-        },
-    )
-    .map_err(BodyError::Db)?
-    .ok_or(BodyError::EmailFileNotFound(rowid))
+/// Shared local extraction path for reads and automatic capture.
+pub fn extract_email_body(rowid: i64, inbox_only: bool) -> BodyResult<CachedBody> {
+    let message = parse_emlx(&std::fs::read(find_email_file(rowid, inbox_only)?)?)?;
+    let (body_text, body_format) = parse_email_body(&message)?;
+    let parsed = mailparse::parse_mail(&message).map_err(|e| BodyError::Parse(e.to_string()))?;
+    let to = header_values(&parsed, "to");
+    let cc = header_values(&parsed, "cc");
+    Ok(CachedBody {
+        body_text,
+        body_format,
+        to,
+        cc,
+    })
 }
 
 fn identity_id_for_body(store: &Store, _rowid: i64, message_id: &str) -> BodyResult<Option<i64>> {

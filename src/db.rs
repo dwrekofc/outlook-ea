@@ -2,9 +2,10 @@ use std::{path::Path, rc::Rc};
 
 use anyhow::{Context, Result, bail};
 use libsql::{Connection, Database, params};
+mod body_cache;
 mod config;
 mod connection;
-mod replica;
+pub mod replica;
 use serde::{Deserialize, Serialize};
 use tokio::runtime::{Builder as RuntimeBuilder, Runtime};
 
