@@ -29,7 +29,8 @@ Apple Mail ←──AppleScript──→ mea CLI ←──libsql──→ vault 
 
 ```bash
 # Install or refresh binary
-cargo install --path . --force
+cargo install --path . --force --locked
+codesign --force --sign "Apple Development: dskinnell@gmail.com (3V6YK342NS)" --identifier com.dwrekofc.mea --options runtime ~/.cargo/bin/mea
 
 # Install Claude Code skills
 mkdir -p ~/.claude/skills/mea
@@ -44,6 +45,25 @@ mea sync
 # Interactive onboarding (in Claude Code)
 /mea-onboard
 ```
+
+## Release / install signing
+
+After every `cargo install` or binary replacement, run the signing command in
+Quick Start before starting a launchd job. The vault installer
+`~/vault/utilities/ai-productivity/install-mea-binary.sh` also signs the copied
+binary with this identity and identifier. Verify the installed signature with:
+
+```bash
+codesign -dv --verbose=2 ~/.cargo/bin/mea
+```
+
+After switching to this signed binary, remove and re-add `~/.cargo/bin/mea` in
+System Settings → Privacy & Security → Full Disk Access **once**. Future installs
+signed with the same identity and `com.dwrekofc.mea` identifier preserve the
+stable signing requirement used by the grant. An unsigned/ad-hoc replacement can
+invalidate access even when the path is unchanged. Terminal FDA success alone
+does not prove launchd access. Wait for the re-grant before kickstarting the
+watch, then verify a fresh `DONE ... errors=0` line in its log.
 
 ## Requirements
 
