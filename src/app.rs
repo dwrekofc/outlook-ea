@@ -9,6 +9,8 @@ mod app_mail;
 
 pub fn run(cli_args: Cli) -> String {
     match cli_args.command {
+        Commands::Watch(args) => crate::watch::command(args),
+        Commands::Doctor => crate::doctor::command(),
         Commands::CacheBodies(args) => crate::cache_bodies::command(args),
         Commands::Replica { action } => match db::replica::command(action) {
             Ok(value) => cli::success(value),

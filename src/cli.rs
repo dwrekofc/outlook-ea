@@ -14,6 +14,10 @@ pub struct Cli {
 
 #[derive(Subcommand)]
 pub enum Commands {
+    /// Watch senders for new mail
+    Watch(crate::watch::Args),
+    /// Diagnose Mail access and launchd executables
+    Doctor,
     /// Capture uncached Apple Mail bodies
     CacheBodies(crate::cache_bodies::Args),
     /// Inspect or recover MEA’s disposable replica
