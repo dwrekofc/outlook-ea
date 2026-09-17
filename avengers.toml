@@ -1,0 +1,7 @@
+senders = ["Bettina Zimmer", "Aniket Singh", "I. Jeyaraman", "D. Sarkar", "Radhika Amin", "Carol Marchesani", "Seyma Borzan Kanar", "aniket.singh06@sap.com", "i.jeyaraman@sap.com", "d.sarkar@sap.com"]
+since_days = 1
+until = "2026-09-30"
+seen_file = "~/.config/vault/logs/avengers-watch.seen"
+out_file = "~/crew/mate/leads/avengers/inbox/watch-replies.md"
+log_file = "~/.config/vault/logs/avengers-watch.log"
+wake_cmd = 'CREW_HOME="$HOME/crew/mate" "$HOME/crew/bin/crew" send avengers "📬 watch: $HITS new replies from the Always-On team — see inbox/watch-replies.md"'
