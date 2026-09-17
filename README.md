@@ -1,5 +1,11 @@
 # mea — Mail Executive Assistant
 
+> **Absorbed into [vault-cli](https://github.com/dwrekofc/vault-cli) 0.20.0 (2026-09-17); archived.**
+> Every command is now `vault mail …` (`src/features/mail_apple/` there; skill `vault-mail`).
+> Only `mea graph add|add-vip|link|dump` remain on this binary until `vault graph` grows them.
+> No further changes land here.
+
+
 An email management system for macOS. Rust CLI + Claude Code skill that reads Apple Mail via AppleScript, stores shared state in Turso, and gives you an AI-powered triage workflow with a knowledge graph of your contacts, teams, and projects.
 
 Graph, labels, and cached bodies live in vault’s Turso database. MEA reuses vault’s existing credentials.
